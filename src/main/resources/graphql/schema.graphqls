@@ -1,0 +1,9 @@
+type Query {
+  financeServiceInfo: FinanceServiceInfo!
+}
+
+type FinanceServiceInfo {
+  name: String!
+  version: String!
+}
+
