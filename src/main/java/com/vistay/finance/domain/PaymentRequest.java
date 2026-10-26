@@ -7,6 +7,8 @@ import jakarta.persistence.Table;
 import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.UUID;
+import org.hibernate.annotations.JdbcTypeCode;
+import org.hibernate.type.SqlTypes;
 
 @Entity
 @Table(name = "payment_requests", schema = "app")
@@ -17,6 +19,7 @@ public class PaymentRequest {
     @Column(name = "payer_type", nullable = false, length = 24) private String payerType;
     @Column(name = "payer_id") private UUID payerId;
     @Column(nullable = false, precision = 19, scale = 4) private BigDecimal amount;
+    @JdbcTypeCode(SqlTypes.CHAR)
     @Column(nullable = false, length = 3, columnDefinition = "char(3)") private String currency;
     @Column(nullable = false, length = 500) private String purpose;
     @Column(nullable = false, length = 24) private String status;
