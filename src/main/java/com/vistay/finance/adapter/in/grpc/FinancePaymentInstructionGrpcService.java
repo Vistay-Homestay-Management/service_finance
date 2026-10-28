@@ -5,8 +5,10 @@ import com.vistay.contracts.common.v1.Money;
 import com.vistay.contracts.finance.v1.FinancePaymentInstructionServiceGrpc;
 import com.vistay.contracts.finance.v1.GetPaymentInstructionRequest;
 import com.vistay.contracts.finance.v1.GetPaymentInstructionResponse;
-import com.vistay.finance.domain.PaymentRequest;
-import com.vistay.finance.domain.PaymentRequestRepository;
+import com.vistay.finance.domain.model.PayerType;
+import com.vistay.finance.domain.model.PaymentRequest;
+import com.vistay.finance.domain.model.PaymentRequestStatus;
+import com.vistay.finance.domain.repository.PaymentRequestRepository;
 import io.grpc.Status;
 import io.grpc.stub.StreamObserver;
 import java.time.Instant;
@@ -17,7 +19,11 @@ import org.springframework.transaction.annotation.Transactional;
 
 @Service
 public class FinancePaymentInstructionGrpcService extends FinancePaymentInstructionServiceGrpc.FinancePaymentInstructionServiceImplBase {
-    private static final Set<String> PAYABLE_STATUSES = Set.of("PENDING", "PROCESSING", "PARTIALLY_PAID");
+    private static final Set<PaymentRequestStatus> PAYABLE_STATUSES = Set.of(
+        PaymentRequestStatus.PENDING,
+        PaymentRequestStatus.PROCESSING,
+        PaymentRequestStatus.PARTIALLY_PAID
+    );
     private final PaymentRequestRepository requests;
 
     public FinancePaymentInstructionGrpcService(PaymentRequestRepository requests) {
@@ -68,7 +74,7 @@ public class FinancePaymentInstructionGrpcService extends FinancePaymentInstruct
                 .setNanos(expiresAt.getNano()))
             .setVersion(request.getVersion());
         if (request.getBookingId() != null) response.setBookingId(request.getBookingId().toString());
-        if ("CUSTOMER".equals(request.getPayerType()) && request.getPayerId() != null) {
+        if (PayerType.CUSTOMER.equals(request.getPayerType()) && request.getPayerId() != null) {
             response.setCustomerId(request.getPayerId().toString());
         }
         return response.build();
