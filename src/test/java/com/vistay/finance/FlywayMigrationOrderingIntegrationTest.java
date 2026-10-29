@@ -147,21 +147,37 @@ class FlywayMigrationOrderingIntegrationTest {
     void outOfOrderDeploymentMatrix_EnforcesOrderAndAllowsControlledCatchup() throws Exception {
         String dbUrl = jdbcUrl.replace("vistay_finance_migration_test", "db_ooo");
 
-        // Phase 1: Deploy V1->V2->V4 first (from standard db/migration location)
-        Flyway initialDeploy = Flyway.configure()
+        // Phase 1a: Deploy the common baseline first.
+        Flyway baselineDeploy = Flyway.configure()
                 .dataSource(dbUrl, username, password)
                 .schemas("app")
                 .defaultSchema("app")
                 .cleanDisabled(true)
                 .outOfOrder(false)
-                .locations("classpath:db/migration")
+                .target("2")
+                .locations("classpath:migration_matrix")
                 .load();
 
-        var r1 = initialDeploy.migrate();
+        var baselineResult = baselineDeploy.migrate();
+        assertThat(baselineResult.success).isTrue();
+        assertThat(baselineResult.targetSchemaVersion).isEqualTo("2");
+
+        // Phase 1b: Simulate V4 being released before SCRUM-386's V3.
+        Flyway v4Deploy = Flyway.configure()
+                .dataSource(dbUrl, username, password)
+                .schemas("app")
+                .defaultSchema("app")
+                .cleanDisabled(true)
+                .outOfOrder(false)
+                .validateOnMigrate(false)
+                .locations("classpath:migration_v4_only")
+                .load();
+
+        var r1 = v4Deploy.migrate();
         assertThat(r1.success).isTrue();
         assertThat(r1.targetSchemaVersion).isEqualTo("4");
 
-        // Phase 2: SCRUM-386 (V3) arrives later. With out-of-order: false, Flyway MUST reject it to prevent uncoordinated deployments
+        // Phase 2: with out-of-order disabled, Flyway rejects retroactive V3 during validation.
         Flyway strictCatchup = Flyway.configure()
                 .dataSource(dbUrl, username, password)
                 .schemas("app")
