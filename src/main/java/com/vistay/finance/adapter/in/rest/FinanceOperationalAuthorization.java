@@ -20,6 +20,14 @@ public class FinanceOperationalAuthorization {
     public static final String REFUND_READ = "refund:read";
     public static final String REFUND_REQUEST = "refund:request";
     public static final String REFUND_APPROVE = "refund:approve";
+    public static final String SETTLEMENT_CREATE = "settlement:create";
+    public static final String SETTLEMENT_READ = "settlement:read";
+    public static final String SETTLEMENT_UPDATE = "settlement:update";
+    public static final String SETTLEMENT_APPROVE = "settlement:approve";
+    public static final String SETTLEMENT_PAYOUT = "settlement:payout";
+    public static final String SETTLEMENT_EXPORT = "settlement:export";
+    public static final String FINANCE_READ = "finance:read";
+    public static final String FINANCE_EXPORT = "finance:export";
 
     private final FinanceAuthorizationClient authorizations;
     private final FinanceBookingAuthorizationClient bookings;
@@ -71,6 +79,15 @@ public class FinanceOperationalAuthorization {
             }
             throw forbidden(actor.permission());
         }
+    }
+
+    public Actor requireAll(Jwt jwt, String permission) {
+        var actor = require(jwt, permission);
+        if (!actor.snapshot().scopes(permission).contains(Scope.ALL)) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN,
+                permission + " requires ALL scope until an authoritative record resolver is available");
+        }
+        return actor;
     }
 
     public UUID bindActor(Actor actor, UUID suppliedAdminUserId) {

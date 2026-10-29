@@ -44,6 +44,16 @@ class FinanceOperationalAuthorizationTest {
     }
 
     @Test
+    void globalSettlementPolicyAcceptsOnlyAllScope() {
+        when(snapshots.require(accountId, PERMISSION)).thenReturn(snapshot(Scope.ALL));
+        assertThatCode(() -> authorization.requireAll(jwt(accountId.toString()), PERMISSION))
+            .doesNotThrowAnyException();
+
+        when(snapshots.require(accountId, PERMISSION)).thenReturn(snapshot(Scope.ASSIGNED));
+        assertForbidden(() -> authorization.requireAll(jwt(accountId.toString()), PERMISSION));
+    }
+
+    @Test
     void assignedScopeAcceptsDirectOrActiveAttribution() {
         var actor = actor(Scope.ASSIGNED);
         when(bookings.get(bookingId)).thenReturn(new BookingRecord(
