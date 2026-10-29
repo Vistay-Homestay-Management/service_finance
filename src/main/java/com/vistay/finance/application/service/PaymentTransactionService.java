@@ -197,6 +197,20 @@ public class PaymentTransactionService {
     }
 
     @Transactional(readOnly = true)
+    public UUID getBookingIdForTransaction(UUID transactionId) {
+        return paymentTransactionRepository.findById(transactionId)
+            .map(PaymentTransaction::getBookingId)
+            .orElseThrow(() -> new NoSuchElementException("Transaction not found: " + transactionId));
+    }
+
+    @Transactional(readOnly = true)
+    public RefundResponse getRefundById(UUID refundId) {
+        return refundRepository.findById(refundId)
+            .map(RefundResponse::fromEntity)
+            .orElseThrow(() -> new NoSuchElementException("Refund not found: " + refundId));
+    }
+
+    @Transactional(readOnly = true)
     public List<RefundResponse> getRefundsByBooking(UUID bookingId) {
         return refundRepository.findByBookingIdOrderByRequestedAtDesc(bookingId)
             .stream()

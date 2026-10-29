@@ -64,6 +64,10 @@ spring:
           target: ${USER_GRPC_ADDRESS:static://localhost:9091}
           ssl:
             bundle: ${USER_GRPC_SSL_BUNDLE:grpc-user-client}
+        booking:
+          target: ${BOOKING_GRPC_ADDRESS:static://localhost:9092}
+          ssl:
+            bundle: ${BOOKING_GRPC_SSL_BUNDLE:grpc-user-client}
   ssl:
     bundle:
       pem:
