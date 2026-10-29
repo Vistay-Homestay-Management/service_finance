@@ -58,6 +58,21 @@ spring:
   grpc:
     server:
       port: ${GRPC_SERVER_PORT:9090}
+    client:
+      channel:
+        user:
+          target: ${USER_GRPC_ADDRESS:static://localhost:9091}
+          ssl:
+            bundle: ${USER_GRPC_SSL_BUNDLE:grpc-user-client}
+  ssl:
+    bundle:
+      pem:
+        grpc-user-client:
+          keystore:
+            certificate: ${GRPC_CLIENT_CERT:file:/run/secrets/grpc/finance.crt}
+            private-key: ${GRPC_CLIENT_KEY:file:/run/secrets/grpc/finance.key}
+          truststore:
+            certificate: ${GRPC_SERVER_CA_CERT:file:/run/secrets/grpc/ca.crt}
 
 server:
   port: ${SERVER_PORT:8080}
@@ -77,6 +92,11 @@ management:
 vistay:
   security:
     audience: ${JWT_AUDIENCE:vistay-backoffice-api}
+  topics:
+    authorization-changed: ${AUTHORIZATION_CHANGED_TOPIC:vistay.user.authorization-changed.v1}
+  authorization:
+    local-cache-ttl: ${AUTHORIZATION_LOCAL_CACHE_TTL:30s}
+    grpc-deadline: ${AUTHORIZATION_GRPC_DEADLINE:2s}
 
 logging:
   structured:

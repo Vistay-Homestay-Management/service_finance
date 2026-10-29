@@ -23,16 +23,18 @@ import java.util.UUID;
 public class RuleCatalogueController {
 
     private final RuleCatalogueService ruleCatalogueService;
+    private final FinanceRuleAuthorization authorization;
 
-    public RuleCatalogueController(RuleCatalogueService ruleCatalogueService) {
+    public RuleCatalogueController(RuleCatalogueService ruleCatalogueService, FinanceRuleAuthorization authorization) {
         this.ruleCatalogueService = ruleCatalogueService;
+        this.authorization = authorization;
     }
 
     @PostMapping
     public ResponseEntity<RuleCatalogueResponse> createRule(
             @AuthenticationPrincipal Jwt jwt,
             @Valid @RequestBody CreateRuleCatalogueCommand command) {
-        FinanceRuleSecurity.assertAuthenticatedAndHasGrant(jwt, FinanceRuleSecurity.PERM_RULE_CREATE, FinanceRuleSecurity.SCOPE_ALL);
+        authorization.requireAll(jwt, FinanceRuleSecurity.PERM_RULE_CREATE);
         String actorId = FinanceRuleSecurity.extractActorIdentity(jwt);
         RuleCatalogueResponse response = ruleCatalogueService.createRule(command, actorId);
         return ResponseEntity.status(HttpStatus.CREATED).body(response);
@@ -43,7 +45,7 @@ public class RuleCatalogueController {
             @AuthenticationPrincipal Jwt jwt,
             @PathVariable String ruleCode,
             @Valid @RequestBody CreateRuleVersionCommand command) {
-        FinanceRuleSecurity.assertAuthenticatedAndHasGrant(jwt, FinanceRuleSecurity.PERM_RULE_CREATE, FinanceRuleSecurity.SCOPE_ALL);
+        authorization.requireAll(jwt, FinanceRuleSecurity.PERM_RULE_CREATE);
         String actorId = FinanceRuleSecurity.extractActorIdentity(jwt);
         RuleCatalogueResponse response = ruleCatalogueService.createNewVersion(ruleCode, command, actorId);
         return ResponseEntity.status(HttpStatus.CREATED).body(response);
@@ -54,7 +56,7 @@ public class RuleCatalogueController {
             @AuthenticationPrincipal Jwt jwt,
             @PathVariable UUID id,
             @RequestBody(required = false) SubmitRuleCatalogueCommand command) {
-        FinanceRuleSecurity.assertAuthenticatedAndHasGrant(jwt, FinanceRuleSecurity.PERM_RULE_SUBMIT, FinanceRuleSecurity.SCOPE_ALL);
+        authorization.requireAll(jwt, FinanceRuleSecurity.PERM_RULE_SUBMIT);
         return ResponseEntity.ok(ruleCatalogueService.submitForApproval(id));
     }
 
@@ -63,7 +65,7 @@ public class RuleCatalogueController {
             @AuthenticationPrincipal Jwt jwt,
             @PathVariable UUID id,
             @RequestBody(required = false) ApproveRuleCatalogueCommand command) {
-        FinanceRuleSecurity.assertAuthenticatedAndHasGrant(jwt, FinanceRuleSecurity.PERM_RULE_APPROVE, FinanceRuleSecurity.SCOPE_ALL);
+        authorization.requireAll(jwt, FinanceRuleSecurity.PERM_RULE_APPROVE);
         String approverId = FinanceRuleSecurity.extractActorIdentity(jwt);
         return ResponseEntity.ok(ruleCatalogueService.approveRule(id, approverId));
     }
@@ -73,7 +75,7 @@ public class RuleCatalogueController {
             @AuthenticationPrincipal Jwt jwt,
             @PathVariable UUID id,
             @Valid @RequestBody RejectRuleCatalogueCommand command) {
-        FinanceRuleSecurity.assertAuthenticatedAndHasGrant(jwt, FinanceRuleSecurity.PERM_RULE_REJECT, FinanceRuleSecurity.SCOPE_ALL);
+        authorization.requireAll(jwt, FinanceRuleSecurity.PERM_RULE_REJECT);
         String reviewerId = FinanceRuleSecurity.extractActorIdentity(jwt);
         return ResponseEntity.ok(ruleCatalogueService.rejectRule(id, reviewerId, command.reason()));
     }
@@ -82,7 +84,7 @@ public class RuleCatalogueController {
     public ResponseEntity<RuleCatalogueResponse> archiveRule(
             @AuthenticationPrincipal Jwt jwt,
             @PathVariable UUID id) {
-        FinanceRuleSecurity.assertAuthenticatedAndHasGrant(jwt, FinanceRuleSecurity.PERM_RULE_ARCHIVE, FinanceRuleSecurity.SCOPE_ALL);
+        authorization.requireAll(jwt, FinanceRuleSecurity.PERM_RULE_ARCHIVE);
         return ResponseEntity.ok(ruleCatalogueService.archiveRule(id));
     }
 
@@ -90,7 +92,7 @@ public class RuleCatalogueController {
     public ResponseEntity<RuleCatalogueResponse> getRuleById(
             @AuthenticationPrincipal Jwt jwt,
             @PathVariable UUID id) {
-        FinanceRuleSecurity.assertAuthenticatedAndHasReadGrant(jwt);
+        authorization.requireAll(jwt, FinanceRuleSecurity.PERM_RULE_READ);
         return ResponseEntity.ok(ruleCatalogueService.getRuleById(id));
     }
 
@@ -98,7 +100,7 @@ public class RuleCatalogueController {
     public ResponseEntity<List<RuleCatalogueResponse>> getRuleVersionsByCode(
             @AuthenticationPrincipal Jwt jwt,
             @PathVariable String code) {
-        FinanceRuleSecurity.assertAuthenticatedAndHasReadGrant(jwt);
+        authorization.requireAll(jwt, FinanceRuleSecurity.PERM_RULE_READ);
         return ResponseEntity.ok(ruleCatalogueService.getRuleVersionsByCode(code));
     }
 
@@ -107,7 +109,7 @@ public class RuleCatalogueController {
             @AuthenticationPrincipal Jwt jwt,
             @PathVariable String code,
             @PathVariable int version) {
-        FinanceRuleSecurity.assertAuthenticatedAndHasReadGrant(jwt);
+        authorization.requireAll(jwt, FinanceRuleSecurity.PERM_RULE_READ);
         return ResponseEntity.ok(ruleCatalogueService.getRuleByCodeAndVersion(code, version));
     }
 
@@ -116,7 +118,7 @@ public class RuleCatalogueController {
             @AuthenticationPrincipal Jwt jwt,
             @RequestParam(required = false) RuleType type,
             @RequestParam(required = false) RuleStatus status) {
-        FinanceRuleSecurity.assertAuthenticatedAndHasReadGrant(jwt);
+        authorization.requireAll(jwt, FinanceRuleSecurity.PERM_RULE_READ);
         return ResponseEntity.ok(ruleCatalogueService.getRules(type, status));
     }
 
@@ -126,7 +128,7 @@ public class RuleCatalogueController {
             @RequestParam RuleType type,
             @RequestParam(required = false) String code,
             @RequestParam(required = false) Instant at) {
-        FinanceRuleSecurity.assertAuthenticatedAndHasReadGrant(jwt);
+        authorization.requireAll(jwt, FinanceRuleSecurity.PERM_RULE_READ);
         return ruleCatalogueService.getActiveEffectiveRule(type, code, at)
                 .map(ResponseEntity::ok)
                 .orElse(ResponseEntity.notFound().build());

@@ -14,6 +14,7 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.core.MethodParameter;
 import org.springframework.http.MediaType;
+import org.springframework.http.HttpStatus;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.core.Authentication;
 import org.springframework.security.core.GrantedAuthority;
@@ -28,6 +29,7 @@ import org.springframework.web.bind.support.WebDataBinderFactory;
 import org.springframework.web.context.request.NativeWebRequest;
 import org.springframework.web.method.support.HandlerMethodArgumentResolver;
 import org.springframework.web.method.support.ModelAndViewContainer;
+import org.springframework.web.server.ResponseStatusException;
 
 import java.time.Instant;
 import java.util.List;
@@ -47,6 +49,9 @@ class RuleCatalogueSecurityControllerTest {
 
     @Mock
     private RuleCatalogueService ruleCatalogueService;
+
+    @Mock
+    private FinanceRuleAuthorization authorization;
 
     @InjectMocks
     private RuleCatalogueController controller;
@@ -79,6 +84,13 @@ class RuleCatalogueSecurityControllerTest {
     }
 
     private RequestPostProcessor withGrant(String subject, String permission, String scope) {
+        doAnswer(invocation -> {
+            String requiredPermission = invocation.getArgument(1);
+            if (!permission.equalsIgnoreCase(requiredPermission) || !"ALL".equalsIgnoreCase(scope)) {
+                throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Missing shared authorization grant");
+            }
+            return null;
+        }).when(authorization).requireAll(any(), anyString());
         return request -> {
             var jwtBuilder = Jwt.withTokenValue("mock-jwt-token")
                     .header("alg", "none")
@@ -98,6 +110,18 @@ class RuleCatalogueSecurityControllerTest {
     }
 
     private RequestPostProcessor withMultiGrants(String subject, List<Map<String, String>> grants) {
+        doAnswer(invocation -> {
+            String requiredPermission = invocation.getArgument(1);
+            boolean allowed = grants.stream().anyMatch(grant -> {
+                String permission = grant.getOrDefault("p", grant.get("permission"));
+                String scope = grant.getOrDefault("s", grant.get("scope"));
+                return requiredPermission.equalsIgnoreCase(permission) && "ALL".equalsIgnoreCase(scope);
+            });
+            if (!allowed) {
+                throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Missing shared authorization grant");
+            }
+            return null;
+        }).when(authorization).requireAll(any(), anyString());
         return request -> {
             var jwtBuilder = Jwt.withTokenValue("mock-jwt-token")
                     .header("alg", "none")
