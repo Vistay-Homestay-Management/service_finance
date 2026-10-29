@@ -16,9 +16,15 @@ import java.util.UUID;
 @Repository
 public interface RuleCatalogueRepository extends JpaRepository<RuleCatalogue, UUID> {
 
-    Optional<RuleCatalogue> findByRuleCode(String ruleCode);
+    List<RuleCatalogue> findByRuleCodeOrderByRuleVersionDesc(String ruleCode);
+
+    Optional<RuleCatalogue> findByRuleCodeAndRuleVersion(String ruleCode, int ruleVersion);
+
+    Optional<RuleCatalogue> findTopByRuleCodeOrderByRuleVersionDesc(String ruleCode);
 
     boolean existsByRuleCode(String ruleCode);
+
+    boolean existsByRuleCodeAndRuleVersion(String ruleCode, int ruleVersion);
 
     List<RuleCatalogue> findByRuleType(RuleType ruleType);
 
@@ -27,12 +33,20 @@ public interface RuleCatalogueRepository extends JpaRepository<RuleCatalogue, UU
     List<RuleCatalogue> findByStatus(RuleStatus status);
 
     @Query("SELECT r FROM RuleCatalogue r " +
+           "WHERE r.ruleCode = :ruleCode " +
+           "AND r.status = 'ACTIVE' " +
+           "AND r.effectiveFrom <= :at " +
+           "AND (r.effectiveTo IS NULL OR r.effectiveTo > :at) " +
+           "ORDER BY r.ruleVersion DESC")
+    List<RuleCatalogue> findActiveEffectiveRulesByCode(@Param("ruleCode") String ruleCode,
+                                                      @Param("at") Instant at);
+
+    @Query("SELECT r FROM RuleCatalogue r " +
            "WHERE r.ruleType = :ruleType " +
            "AND r.status = 'ACTIVE' " +
            "AND r.effectiveFrom <= :at " +
-           "AND (r.effectiveTo IS NULL OR r.effectiveTo >= :at) " +
-           "ORDER BY r.ruleVersion DESC, r.effectiveFrom DESC")
-    List<RuleCatalogue> findActiveEffectiveRules(@Param("ruleType") RuleType ruleType,
-                                                @Param("at") Instant at);
+           "AND (r.effectiveTo IS NULL OR r.effectiveTo > :at) " +
+           "ORDER BY r.ruleCode ASC, r.ruleVersion DESC")
+    List<RuleCatalogue> findActiveEffectiveRulesByType(@Param("ruleType") RuleType ruleType,
+                                                      @Param("at") Instant at);
 }
-

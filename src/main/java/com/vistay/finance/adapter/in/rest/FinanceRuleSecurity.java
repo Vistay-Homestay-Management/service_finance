@@ -10,6 +10,7 @@ import org.springframework.web.server.ResponseStatusException;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 
 public final class FinanceRuleSecurity {
 
@@ -19,6 +20,13 @@ public final class FinanceRuleSecurity {
     public static final String PERM_RULE_REJECT = "finance:rules:reject";
     public static final String PERM_RULE_ARCHIVE = "finance:rules:archive";
     public static final String PERM_RULE_READ = "finance:rules:read";
+
+    public static final String SCOPE_ALL = "ALL";
+    public static final String SCOPE_BRANCH = "BRANCH";
+    public static final String SCOPE_OWN = "OWN";
+    public static final String SCOPE_ASSIGNED = "ASSIGNED";
+
+    private static final Set<String> VALID_SCOPES = Set.of(SCOPE_ALL, SCOPE_BRANCH, SCOPE_OWN, SCOPE_ASSIGNED);
 
     private FinanceRuleSecurity() {
     }
@@ -42,60 +50,102 @@ public final class FinanceRuleSecurity {
         throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Principal subject or actor id is missing in JWT claims");
     }
 
-    public static void assertAuthenticatedAndHasGrant(Jwt jwt, String requiredPermission) {
+    public static void assertAuthenticatedAndHasGrant(Jwt jwt, String requiredPermission, String requiredScope) {
         if (jwt == null) {
             throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Missing or invalid authenticated principal");
         }
-        if (!hasGrant(jwt, requiredPermission)) {
+        if (!hasGrant(jwt, requiredPermission, requiredScope)) {
             throw new ResponseStatusException(HttpStatus.FORBIDDEN,
-                    "Access denied: Missing required permission grant '" + requiredPermission + "'");
+                    "Access denied: Missing required grant (" + requiredPermission + " with scope " + requiredScope + ")");
         }
     }
 
-    public static boolean hasGrant(Jwt jwt, String requiredPermission) {
+    public static void assertAuthenticatedAndHasReadGrant(Jwt jwt) {
         if (jwt == null) {
+            throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Missing or invalid authenticated principal");
+        }
+        if (!hasReadGrant(jwt)) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN,
+                    "Access denied: Missing required permission grant '" + PERM_RULE_READ + "'");
+        }
+    }
+
+    public static boolean hasGrant(Jwt jwt, String requiredPermission, String requiredScope) {
+        if (jwt == null || requiredPermission == null || requiredScope == null) {
             return false;
         }
 
-        // 1. Check ViStay fine-grained 'grants' claim: List<Map<p, s>> or Map
+        // 1. Check ViStay fine-grained 'grants' claim: List<Map<p, s>>
+        // Each grant item must match BOTH permission AND scope atomically!
         Object grantsObj = jwt.getClaims().get("grants");
         if (grantsObj instanceof List<?> list) {
             for (Object item : list) {
                 if (item instanceof Map<?, ?> map) {
                     Object p = map.get("p");
                     Object perm = map.get("permission");
-                    if (matchesPermission(p, requiredPermission) || matchesPermission(perm, requiredPermission)) {
+                    Object s = map.get("s");
+                    Object scope = map.get("scope");
+
+                    String permVal = (p != null) ? p.toString() : (perm != null ? perm.toString() : null);
+                    String scopeVal = (s != null) ? s.toString() : (scope != null ? scope.toString() : null);
+
+                    if (matchesPermission(permVal, requiredPermission) && matchesScope(scopeVal, requiredScope)) {
                         return true;
                     }
-                } else if (matchesPermission(item, requiredPermission)) {
-                    return true;
                 }
             }
-        } else if (grantsObj instanceof Map<?, ?> map) {
-            for (Map.Entry<?, ?> entry : map.entrySet()) {
-                if (matchesPermission(entry.getKey(), requiredPermission)
-                        || matchesPermission(entry.getValue(), requiredPermission)) {
+        }
+
+        // 2. Check Spring Security authorities from SecurityContext (e.g. SCOPE_finance:rules:create_ALL)
+        Authentication auth = SecurityContextHolder.getContext().getAuthentication();
+        if (auth != null) {
+            String targetAuthority = requiredPermission + "_" + requiredScope;
+            for (GrantedAuthority ga : auth.getAuthorities()) {
+                String authStr = ga.getAuthority();
+                if (targetAuthority.equalsIgnoreCase(authStr)
+                        || ("SCOPE_" + targetAuthority).equalsIgnoreCase(authStr)) {
                     return true;
                 }
             }
         }
 
-        // 2. Check standard 'scope' or 'scp' claim
-        String scope = jwt.getClaimAsString("scope");
-        if (scope != null) {
-            for (String s : scope.split("\\s+")) {
-                if (matchesPermission(s, requiredPermission)) {
-                    return true;
+        return false;
+    }
+
+    public static boolean hasReadGrant(Jwt jwt) {
+        if (jwt == null) {
+            return false;
+        }
+
+        Object grantsObj = jwt.getClaims().get("grants");
+        if (grantsObj instanceof List<?> list) {
+            for (Object item : list) {
+                if (item instanceof Map<?, ?> map) {
+                    Object p = map.get("p");
+                    Object perm = map.get("permission");
+                    Object s = map.get("s");
+                    Object scope = map.get("scope");
+
+                    String permVal = (p != null) ? p.toString() : (perm != null ? perm.toString() : null);
+                    String scopeVal = (s != null) ? s.toString() : (scope != null ? scope.toString() : null);
+
+                    if (matchesPermission(permVal, PERM_RULE_READ) && scopeVal != null && VALID_SCOPES.contains(scopeVal.trim().toUpperCase())) {
+                        return true;
+                    }
                 }
             }
         }
 
-        // 3. Check Spring Security authorities from SecurityContext
         Authentication auth = SecurityContextHolder.getContext().getAuthentication();
         if (auth != null) {
             for (GrantedAuthority ga : auth.getAuthorities()) {
-                if (matchesPermission(ga.getAuthority(), requiredPermission)) {
-                    return true;
+                String authStr = ga.getAuthority();
+                for (String scope : VALID_SCOPES) {
+                    String targetAuthority = PERM_RULE_READ + "_" + scope;
+                    if (targetAuthority.equalsIgnoreCase(authStr)
+                            || ("SCOPE_" + targetAuthority).equalsIgnoreCase(authStr)) {
+                        return true;
+                    }
                 }
             }
         }
@@ -104,17 +154,18 @@ public final class FinanceRuleSecurity {
     }
 
     private static boolean matchesPermission(Object candidate, String target) {
-        if (candidate == null) {
+        if (candidate == null || target == null) {
             return false;
         }
         String candStr = Objects.toString(candidate, "").trim();
-        if (target.equalsIgnoreCase(candStr)) {
-            return true;
+        return target.equalsIgnoreCase(candStr);
+    }
+
+    private static boolean matchesScope(Object candidate, String target) {
+        if (candidate == null || target == null) {
+            return false;
         }
-        if (candStr.startsWith("SCOPE_") && target.equalsIgnoreCase(candStr.substring("SCOPE_".length()))) {
-            return true;
-        }
-        return false;
+        String candStr = Objects.toString(candidate, "").trim();
+        return target.equalsIgnoreCase(candStr);
     }
 }
-

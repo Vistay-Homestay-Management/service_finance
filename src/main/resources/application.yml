@@ -23,7 +23,7 @@ spring:
     create-schemas: true
     clean-disabled: true
     baseline-on-migrate: false
-    out-of-order: true
+    out-of-order: false
     validate-on-migrate: true
   security:
     oauth2:

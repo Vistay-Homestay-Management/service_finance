@@ -7,10 +7,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.testcontainers.containers.PostgreSQLContainer;
 
-import java.net.InetSocketAddress;
-import java.net.Socket;
 import java.sql.*;
-import java.time.Instant;
 import java.util.UUID;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -27,53 +24,25 @@ class RuleCatalogueConcurrencyIntegrationTest {
 
     @BeforeAll
     static void setUpAll() {
-        if (isReachable("127.0.0.1", 5433)) {
-            ensureDatabaseExists("127.0.0.1", 5433, "vistay_finance_test", "vistay", "vistay");
-            jdbcUrl = "jdbc:postgresql://127.0.0.1:5433/vistay_finance_test";
-            username = "vistay";
-            password = "vistay";
-        } else {
-            postgres = new PostgreSQLContainer<>("postgres:16-alpine")
-                    .withDatabaseName("vistay_finance_test")
-                    .withUsername("vistay")
-                    .withPassword("vistay");
-            postgres.start();
-            jdbcUrl = postgres.getJdbcUrl();
-            username = postgres.getUsername();
-            password = postgres.getPassword();
-        }
+        postgres = new PostgreSQLContainer<>("postgres:16-alpine")
+                .withDatabaseName("vistay_finance_isolated_test")
+                .withUsername("vistay_test_user")
+                .withPassword("vistay_test_pass");
+        postgres.start();
 
+        jdbcUrl = postgres.getJdbcUrl();
+        username = postgres.getUsername();
+        password = postgres.getPassword();
+
+        // Safe forward-only migration in isolated ephemeral container. Never clean existing databases.
         Flyway flyway = Flyway.configure()
                 .dataSource(jdbcUrl, username, password)
                 .schemas("app")
                 .defaultSchema("app")
-                .cleanDisabled(false)
-                .outOfOrder(true)
+                .cleanDisabled(true)
                 .locations("classpath:db/migration")
                 .load();
-        flyway.clean();
         flyway.migrate();
-    }
-
-    private static boolean isReachable(String host, int port) {
-        try (Socket socket = new Socket()) {
-            socket.connect(new InetSocketAddress(host, port), 1000);
-            return true;
-        } catch (Exception e) {
-            return false;
-        }
-    }
-
-    private static void ensureDatabaseExists(String host, int port, String dbName, String user, String pass) {
-        String adminUrl = "jdbc:postgresql://" + host + ":" + port + "/postgres";
-        try (Connection conn = DriverManager.getConnection(adminUrl, user, pass);
-             Statement st = conn.createStatement()) {
-            ResultSet rs = st.executeQuery("SELECT 1 FROM pg_database WHERE datname = '" + dbName + "'");
-            if (!rs.next()) {
-                st.executeUpdate("CREATE DATABASE " + dbName);
-            }
-        } catch (Exception ignored) {
-        }
     }
 
     @AfterAll
@@ -88,7 +57,7 @@ class RuleCatalogueConcurrencyIntegrationTest {
     }
 
     @Test
-    @DisplayName("Concurrent approval with optimistic locking allows exactly one winner")
+    @DisplayName("SCRUM-317: Concurrent approval with optimistic locking allows exactly one winner")
     void concurrentApproval_OptimisticLockingAllowsExactlyOneWinner() throws Exception {
         UUID ruleId = UUID.randomUUID();
         String ruleCode = "CONC-RULE-" + UUID.randomUUID().toString().substring(0, 8);
@@ -99,7 +68,7 @@ class RuleCatalogueConcurrencyIntegrationTest {
                      INSERT INTO app.finance_rule_catalogues (
                          id, rule_code, rule_name, rule_type, rule_version, opt_lock_version,
                          parameters_json, effective_from, status, created_by_admin_user_id
-                     ) VALUES (?, ?, 'Concurrent Test Rule', 'PRICING', 1, 0, '{}', now(), 'PENDING_APPROVAL', ?)
+                     ) VALUES (?, ?, 'Concurrent Test Rule', 'PRICING', 1, 0, '{}'::jsonb, now(), 'PENDING_APPROVAL', ?)
                      """)) {
             ps.setObject(1, ruleId);
             ps.setString(2, ruleCode);
@@ -167,7 +136,7 @@ class RuleCatalogueConcurrencyIntegrationTest {
     }
 
     @Test
-    @DisplayName("Maker-Checker database check constraint prevents creator from approving self")
+    @DisplayName("SCRUM-317: Maker-Checker database check constraint prevents creator from approving self")
     void makerCheckerCheckConstraint_RejectsCreatorAsApprover() throws Exception {
         UUID ruleId = UUID.randomUUID();
         String ruleCode = "MC-RULE-" + UUID.randomUUID().toString().substring(0, 8);
@@ -178,7 +147,7 @@ class RuleCatalogueConcurrencyIntegrationTest {
                      INSERT INTO app.finance_rule_catalogues (
                          id, rule_code, rule_name, rule_type, rule_version, opt_lock_version,
                          parameters_json, effective_from, status, created_by_admin_user_id
-                     ) VALUES (?, ?, 'Self Approver Test', 'CANCELLATION', 1, 0, '{}', now(), 'PENDING_APPROVAL', ?)
+                     ) VALUES (?, ?, 'Self Approver Test', 'CANCELLATION', 1, 0, '{}'::jsonb, now(), 'PENDING_APPROVAL', ?)
                      """)) {
             ps.setObject(1, ruleId);
             ps.setString(2, ruleCode);
@@ -201,7 +170,7 @@ class RuleCatalogueConcurrencyIntegrationTest {
     }
 
     @Test
-    @DisplayName("Effective dates check constraint prevents effective_to before effective_from")
+    @DisplayName("SCRUM-317: Effective dates check constraint prevents effective_to <= effective_from")
     void effectiveDatesCheckConstraint_RejectsInvalidRange() throws Exception {
         UUID ruleId = UUID.randomUUID();
         String ruleCode = "DATE-RULE-" + UUID.randomUUID().toString().substring(0, 8);
@@ -211,7 +180,7 @@ class RuleCatalogueConcurrencyIntegrationTest {
                      INSERT INTO app.finance_rule_catalogues (
                          id, rule_code, rule_name, rule_type, rule_version, opt_lock_version,
                          parameters_json, effective_from, effective_to, status, created_by_admin_user_id
-                     ) VALUES (?, ?, 'Invalid Date Test', 'DEPOSIT', 1, 0, '{}', now(), now() - INTERVAL '1 day', 'DRAFT', 'ADMIN:MAKER')
+                     ) VALUES (?, ?, 'Invalid Date Test', 'DEPOSIT', 1, 0, '{}'::jsonb, now(), now() - INTERVAL '1 day', 'DRAFT', 'ADMIN:MAKER')
                      """)) {
             ps.setObject(1, ruleId);
             ps.setString(2, ruleCode);
@@ -222,7 +191,7 @@ class RuleCatalogueConcurrencyIntegrationTest {
     }
 
     @Test
-    @DisplayName("Rule type check constraint rejects unsupported rule types")
+    @DisplayName("SCRUM-317: Rule type check constraint rejects unsupported rule types")
     void ruleTypeCheckConstraint_RejectsUnknownType() throws Exception {
         UUID ruleId = UUID.randomUUID();
         String ruleCode = "TYPE-RULE-" + UUID.randomUUID().toString().substring(0, 8);
@@ -232,13 +201,148 @@ class RuleCatalogueConcurrencyIntegrationTest {
                      INSERT INTO app.finance_rule_catalogues (
                          id, rule_code, rule_name, rule_type, rule_version, opt_lock_version,
                          parameters_json, effective_from, status, created_by_admin_user_id
-                     ) VALUES (?, ?, 'Invalid Type Test', 'UNKNOWN_TYPE', 1, 0, '{}', now(), 'DRAFT', 'ADMIN:MAKER')
+                     ) VALUES (?, ?, 'Invalid Type Test', 'UNKNOWN_TYPE', 1, 0, '{}'::jsonb, now(), 'DRAFT', 'ADMIN:MAKER')
                      """)) {
             ps.setObject(1, ruleId);
             ps.setString(2, ruleCode);
             assertThatThrownBy(ps::executeUpdate)
                     .isInstanceOf(SQLException.class)
                     .hasMessageContaining("ck_rule_catalogue_type");
+        }
+    }
+
+    @Test
+    @DisplayName("SCRUM-317: PostgreSQL JSONB check constraint rejects non-object parameter values")
+    void jsonbCheckConstraint_RejectsNonObjectParameters() throws Exception {
+        UUID ruleId = UUID.randomUUID();
+        String ruleCode = "JSON-RULE-" + UUID.randomUUID().toString().substring(0, 8);
+
+        try (Connection conn = createConnection();
+             PreparedStatement ps = conn.prepareStatement("""
+                     INSERT INTO app.finance_rule_catalogues (
+                         id, rule_code, rule_name, rule_type, rule_version, opt_lock_version,
+                         parameters_json, effective_from, status, created_by_admin_user_id
+                     ) VALUES (?, ?, 'Invalid Json Test', 'PRICING', 1, 0, '[1, 2, 3]'::jsonb, now(), 'DRAFT', 'ADMIN:MAKER')
+                     """)) {
+            ps.setObject(1, ruleId);
+            ps.setString(2, ruleCode);
+            assertThatThrownBy(ps::executeUpdate)
+                    .isInstanceOf(SQLException.class)
+                    .hasMessageContaining("ck_rule_catalogue_params");
+        }
+    }
+
+    @Test
+    @DisplayName("SCRUM-317: Unique constraint uq_rule_catalogue_code_version prevents duplicate version creation")
+    void versioningConstraint_PreventsDuplicateCodeAndVersion() throws Exception {
+        UUID ruleId1 = UUID.randomUUID();
+        UUID ruleId2 = UUID.randomUUID();
+        String ruleCode = "VER-RULE-" + UUID.randomUUID().toString().substring(0, 8);
+
+        try (Connection conn = createConnection()) {
+            try (PreparedStatement ps1 = conn.prepareStatement("""
+                    INSERT INTO app.finance_rule_catalogues (
+                        id, rule_code, rule_name, rule_type, rule_version, opt_lock_version,
+                        parameters_json, effective_from, status, created_by_admin_user_id
+                    ) VALUES (?, ?, 'Version 1', 'PRICING', 1, 0, '{}'::jsonb, now(), 'DRAFT', 'ADMIN:MAKER')
+                    """)) {
+                ps1.setObject(1, ruleId1);
+                ps1.setString(2, ruleCode);
+                ps1.executeUpdate();
+            }
+
+            try (PreparedStatement ps2 = conn.prepareStatement("""
+                    INSERT INTO app.finance_rule_catalogues (
+                        id, rule_code, rule_name, rule_type, rule_version, opt_lock_version,
+                        parameters_json, effective_from, status, created_by_admin_user_id
+                    ) VALUES (?, ?, 'Version 1 duplicate', 'PRICING', 1, 0, '{}'::jsonb, now(), 'DRAFT', 'ADMIN:MAKER')
+                    """)) {
+                ps2.setObject(1, ruleId2);
+                ps2.setString(2, ruleCode);
+                assertThatThrownBy(ps2::executeUpdate)
+                        .isInstanceOf(SQLException.class)
+                        .hasMessageContaining("uq_rule_catalogue_code_version");
+            }
+        }
+    }
+
+    @Test
+    @DisplayName("SCRUM-317: Exclusion constraint ex_rule_catalogue_active_overlap prevents overlapping ACTIVE rules")
+    void exclusionConstraint_PreventsOverlappingActiveRulesForSameCode() throws Exception {
+        UUID ruleId1 = UUID.randomUUID();
+        UUID ruleId2 = UUID.randomUUID();
+        String ruleCode = "OVERLAP-RULE-" + UUID.randomUUID().toString().substring(0, 8);
+
+        try (Connection conn = createConnection()) {
+            // Version 1: ACTIVE from 2026-06-01 to 2026-06-30
+            try (PreparedStatement ps1 = conn.prepareStatement("""
+                    INSERT INTO app.finance_rule_catalogues (
+                        id, rule_code, rule_name, rule_type, rule_version, opt_lock_version,
+                        parameters_json, effective_from, effective_to, status, created_by_admin_user_id, approved_by_admin_user_id
+                    ) VALUES (?, ?, 'Season 1', 'PRICING', 1, 0, '{}'::jsonb,
+                             '2026-06-01 00:00:00+00'::timestamptz, '2026-06-30 00:00:00+00'::timestamptz,
+                             'ACTIVE', 'ADMIN:MAKER', 'ADMIN:CHECKER')
+                    """)) {
+                ps1.setObject(1, ruleId1);
+                ps1.setString(2, ruleCode);
+                ps1.executeUpdate();
+            }
+
+            // Version 2: ACTIVE from 2026-06-15 to 2026-07-15 (overlaps with Version 1)
+            try (PreparedStatement ps2 = conn.prepareStatement("""
+                    INSERT INTO app.finance_rule_catalogues (
+                        id, rule_code, rule_name, rule_type, rule_version, opt_lock_version,
+                        parameters_json, effective_from, effective_to, status, created_by_admin_user_id, approved_by_admin_user_id
+                    ) VALUES (?, ?, 'Season 2 Overlapping', 'PRICING', 2, 0, '{}'::jsonb,
+                             '2026-06-15 00:00:00+00'::timestamptz, '2026-07-15 00:00:00+00'::timestamptz,
+                             'ACTIVE', 'ADMIN:MAKER', 'ADMIN:CHECKER')
+                    """)) {
+                ps2.setObject(1, ruleId2);
+                ps2.setString(2, ruleCode);
+                assertThatThrownBy(ps2::executeUpdate)
+                        .isInstanceOf(SQLException.class)
+                        .hasMessageContaining("ex_rule_catalogue_active_overlap");
+            }
+        }
+    }
+
+    @Test
+    @DisplayName("SCRUM-317: Exclusion constraint allows sequential ACTIVE rules meeting at half-open boundary")
+    void exclusionConstraint_AllowsSequentialActiveRulesAtBoundary() throws Exception {
+        UUID ruleId1 = UUID.randomUUID();
+        UUID ruleId2 = UUID.randomUUID();
+        String ruleCode = "TOUCH-RULE-" + UUID.randomUUID().toString().substring(0, 8);
+
+        try (Connection conn = createConnection()) {
+            // Version 1: ACTIVE from [2026-06-01, 2026-07-01)
+            try (PreparedStatement ps1 = conn.prepareStatement("""
+                    INSERT INTO app.finance_rule_catalogues (
+                        id, rule_code, rule_name, rule_type, rule_version, opt_lock_version,
+                        parameters_json, effective_from, effective_to, status, created_by_admin_user_id, approved_by_admin_user_id
+                    ) VALUES (?, ?, 'Period 1', 'PRICING', 1, 0, '{}'::jsonb,
+                             '2026-06-01 00:00:00+00'::timestamptz, '2026-07-01 00:00:00+00'::timestamptz,
+                             'ACTIVE', 'ADMIN:MAKER', 'ADMIN:CHECKER')
+                    """)) {
+                ps1.setObject(1, ruleId1);
+                ps1.setString(2, ruleCode);
+                int r1 = ps1.executeUpdate();
+                assertThat(r1).isEqualTo(1);
+            }
+
+            // Version 2: ACTIVE from [2026-07-01, 2026-08-01) - Touches exactly at boundary, does NOT overlap
+            try (PreparedStatement ps2 = conn.prepareStatement("""
+                    INSERT INTO app.finance_rule_catalogues (
+                        id, rule_code, rule_name, rule_type, rule_version, opt_lock_version,
+                        parameters_json, effective_from, effective_to, status, created_by_admin_user_id, approved_by_admin_user_id
+                    ) VALUES (?, ?, 'Period 2', 'PRICING', 2, 0, '{}'::jsonb,
+                             '2026-07-01 00:00:00+00'::timestamptz, '2026-08-01 00:00:00+00'::timestamptz,
+                             'ACTIVE', 'ADMIN:MAKER', 'ADMIN:CHECKER')
+                    """)) {
+                ps2.setObject(1, ruleId2);
+                ps2.setString(2, ruleCode);
+                int r2 = ps2.executeUpdate();
+                assertThat(r2).isEqualTo(1);
+            }
         }
     }
 }

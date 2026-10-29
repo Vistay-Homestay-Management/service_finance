@@ -1,6 +1,8 @@
 package com.vistay.finance.domain.model;
 
 import jakarta.persistence.*;
+import org.hibernate.annotations.JdbcTypeCode;
+import org.hibernate.type.SqlTypes;
 
 import java.time.Instant;
 import java.util.Objects;
@@ -14,7 +16,7 @@ public class RuleCatalogue {
     @Column(name = "id", nullable = false, updatable = false)
     private UUID id = UUID.randomUUID();
 
-    @Column(name = "rule_code", nullable = false, unique = true, length = 60)
+    @Column(name = "rule_code", nullable = false, length = 60)
     private String ruleCode;
 
     @Column(name = "rule_name", nullable = false, length = 160)
@@ -34,7 +36,8 @@ public class RuleCatalogue {
     @Column(name = "description", columnDefinition = "text")
     private String description;
 
-    @Column(name = "parameters_json", nullable = false, columnDefinition = "text")
+    @JdbcTypeCode(SqlTypes.JSON)
+    @Column(name = "parameters_json", nullable = false, columnDefinition = "jsonb")
     private String parametersJson = "{}";
 
     @Column(name = "effective_from", nullable = false)
@@ -79,6 +82,18 @@ public class RuleCatalogue {
                          Instant effectiveFrom,
                          Instant effectiveTo,
                          String createdByAdminUserId) {
+        this(ruleCode, ruleName, ruleType, 1, description, parametersJson, effectiveFrom, effectiveTo, createdByAdminUserId);
+    }
+
+    public RuleCatalogue(String ruleCode,
+                         String ruleName,
+                         RuleType ruleType,
+                         int ruleVersion,
+                         String description,
+                         String parametersJson,
+                         Instant effectiveFrom,
+                         Instant effectiveTo,
+                         String createdByAdminUserId) {
         if (ruleCode == null || ruleCode.isBlank()) {
             throw new IllegalArgumentException("Rule code cannot be blank");
         }
@@ -88,11 +103,14 @@ public class RuleCatalogue {
         if (ruleType == null) {
             throw new IllegalArgumentException("Rule type cannot be null");
         }
+        if (ruleVersion < 1) {
+            throw new IllegalArgumentException("Rule version must be greater than or equal to 1");
+        }
         if (effectiveFrom == null) {
             throw new IllegalArgumentException("Effective from cannot be null");
         }
-        if (effectiveTo != null && effectiveTo.isBefore(effectiveFrom)) {
-            throw new IllegalArgumentException("Effective to cannot be before effective from");
+        if (effectiveTo != null && !effectiveTo.isAfter(effectiveFrom)) {
+            throw new IllegalArgumentException("Effective to must be strictly after effective from");
         }
         if (createdByAdminUserId == null || createdByAdminUserId.isBlank()) {
             throw new IllegalArgumentException("Creator actor identity cannot be null or blank");
@@ -101,13 +119,13 @@ public class RuleCatalogue {
         this.ruleCode = ruleCode.trim();
         this.ruleName = ruleName.trim();
         this.ruleType = ruleType;
+        this.ruleVersion = ruleVersion;
         this.description = description != null ? description.trim() : null;
         this.parametersJson = (parametersJson != null && !parametersJson.isBlank()) ? parametersJson.trim() : "{}";
         this.effectiveFrom = effectiveFrom;
         this.effectiveTo = effectiveTo;
         this.createdByAdminUserId = createdByAdminUserId.trim();
         this.status = RuleStatus.DRAFT;
-        this.ruleVersion = 1;
         this.optLockVersion = 0;
         this.createdAt = Instant.now();
         this.updatedAt = Instant.now();
@@ -170,6 +188,9 @@ public class RuleCatalogue {
         this.updatedAt = Instant.now();
     }
 
+    /**
+     * Checks if this rule is ACTIVE and effective at the given time instant based on half-open interval [effectiveFrom, effectiveTo).
+     */
     public boolean isEffectiveAt(Instant time) {
         if (status != RuleStatus.ACTIVE) {
             return false;
@@ -177,7 +198,7 @@ public class RuleCatalogue {
         if (time.isBefore(effectiveFrom)) {
             return false;
         }
-        return effectiveTo == null || !time.isAfter(effectiveTo);
+        return effectiveTo == null || time.isBefore(effectiveTo);
     }
 
     // Getters
@@ -253,4 +274,3 @@ public class RuleCatalogue {
         return updatedAt;
     }
 }
-

@@ -78,17 +78,17 @@ class RuleCatalogueSecurityControllerTest {
         SecurityContextHolder.clearContext();
     }
 
-    private RequestPostProcessor withJwt(String subject, String permission) {
+    private RequestPostProcessor withGrant(String subject, String permission, String scope) {
         return request -> {
             var jwtBuilder = Jwt.withTokenValue("mock-jwt-token")
                     .header("alg", "none")
                     .subject(subject)
-                    .claim("aud", List.of("vistay-services"))
+                    .claim("aud", List.of("vistay-backoffice-api"))
                     .claim("account_type", "ADMIN")
-                    .claim("grants", List.of(Map.of("p", permission, "s", "ALL")));
+                    .claim("grants", List.of(Map.of("p", permission, "s", scope)));
 
             Jwt jwt = jwtBuilder.build();
-            List<GrantedAuthority> authorities = List.of(new SimpleGrantedAuthority("SCOPE_" + permission));
+            List<GrantedAuthority> authorities = List.of(new SimpleGrantedAuthority("SCOPE_" + permission + "_" + scope));
 
             SecurityContext context = SecurityContextHolder.createEmptyContext();
             context.setAuthentication(new UsernamePasswordAuthenticationToken(jwt, null, authorities));
@@ -97,8 +97,25 @@ class RuleCatalogueSecurityControllerTest {
         };
     }
 
+    private RequestPostProcessor withMultiGrants(String subject, List<Map<String, String>> grants) {
+        return request -> {
+            var jwtBuilder = Jwt.withTokenValue("mock-jwt-token")
+                    .header("alg", "none")
+                    .subject(subject)
+                    .claim("aud", List.of("vistay-backoffice-api"))
+                    .claim("account_type", "ADMIN")
+                    .claim("grants", grants);
+
+            Jwt jwt = jwtBuilder.build();
+            SecurityContext context = SecurityContextHolder.createEmptyContext();
+            context.setAuthentication(new UsernamePasswordAuthenticationToken(jwt, null, List.of()));
+            SecurityContextHolder.setContext(context);
+            return request;
+        };
+    }
+
     @Test
-    @DisplayName("Request without JWT token is rejected with 401 Unauthorized")
+    @DisplayName("SCRUM-317: Request without JWT token is rejected with 401 Unauthorized")
     void unauthenticatedRequest_Returns401() throws Exception {
         mockMvc.perform(post("/api/v1/finance/rules")
                         .contentType(MediaType.APPLICATION_JSON)
@@ -115,10 +132,10 @@ class RuleCatalogueSecurityControllerTest {
     }
 
     @Test
-    @DisplayName("Request missing required grant is rejected with 403 Forbidden")
+    @DisplayName("SCRUM-317: Request missing required grant is rejected with 403 Forbidden")
     void missingGrant_Returns403() throws Exception {
         mockMvc.perform(post("/api/v1/finance/rules")
-                        .with(withJwt("ADMIN:102", "some:unrelated:permission"))
+                        .with(withGrant("ADMIN:102", "some:unrelated:permission", "ALL"))
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
                                 {
@@ -133,15 +150,57 @@ class RuleCatalogueSecurityControllerTest {
     }
 
     @Test
-    @DisplayName("Create rule extracts actor identity from JWT subject and returns 201 Created")
+    @DisplayName("SCRUM-317: Permission correct but data scope wrong (BRANCH instead of ALL) is rejected with 403 Forbidden")
+    void matchingPermission_WrongScope_Returns403() throws Exception {
+        mockMvc.perform(post("/api/v1/finance/rules")
+                        .with(withGrant("ADMIN:102", "finance:rules:create", "BRANCH"))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {
+                                  "ruleCode": "RULE-TEST-01",
+                                  "ruleName": "Test Rule",
+                                  "ruleType": "PRICING",
+                                  "parametersJson": "{}",
+                                  "effectiveFrom": "2026-06-01T00:00:00Z"
+                                }
+                                """))
+                .andExpect(status().isForbidden());
+    }
+
+    @Test
+    @DisplayName("SCRUM-317: Cannot combine permission from Grant A with scope from Grant B to forge access (403 Forbidden)")
+    void mixingGrants_CannotCombinePermissionFromGrantAWithScopeFromGrantB_Returns403() throws Exception {
+        // Grant A has permission with BRANCH scope; Grant B has different permission with ALL scope
+        var splitGrants = List.of(
+                Map.of("p", "finance:rules:create", "s", "BRANCH"),
+                Map.of("p", "other:service:action", "s", "ALL")
+        );
+
+        mockMvc.perform(post("/api/v1/finance/rules")
+                        .with(withMultiGrants("ADMIN:102", splitGrants))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {
+                                  "ruleCode": "RULE-TEST-01",
+                                  "ruleName": "Test Rule",
+                                  "ruleType": "PRICING",
+                                  "parametersJson": "{}",
+                                  "effectiveFrom": "2026-06-01T00:00:00Z"
+                                }
+                                """))
+                .andExpect(status().isForbidden());
+    }
+
+    @Test
+    @DisplayName("SCRUM-317: Create rule extracts actor from JWT sub and returns 201 Created with valid ALL scope grant")
     void createRule_ExtractsActorFromJwt() throws Exception {
         UUID ruleId = UUID.randomUUID();
-        RuleCatalogueResponse mockResponse = createMockResponse(ruleId, "ADMIN:101", RuleStatus.DRAFT);
+        RuleCatalogueResponse mockResponse = createMockResponse(ruleId, "ADMIN:101", RuleStatus.DRAFT, 1);
         when(ruleCatalogueService.createRule(any(CreateRuleCatalogueCommand.class), eq("ADMIN:101")))
                 .thenReturn(mockResponse);
 
         mockMvc.perform(post("/api/v1/finance/rules")
-                        .with(withJwt("ADMIN:101", "finance:rules:create"))
+                        .with(withGrant("ADMIN:101", "finance:rules:create", "ALL"))
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
                                 {
@@ -153,38 +212,45 @@ class RuleCatalogueSecurityControllerTest {
                                 }
                                 """))
                 .andExpect(status().isCreated())
-                .andExpect(jsonPath("$.createdByAdminUserId").value("ADMIN:101"));
+                .andExpect(jsonPath("$.createdByAdminUserId").value("ADMIN:101"))
+                .andExpect(jsonPath("$.ruleVersion").value(1));
 
         verify(ruleCatalogueService).createRule(any(CreateRuleCatalogueCommand.class), eq("ADMIN:101"));
     }
 
     @Test
-    @DisplayName("Approve grant alone cannot create rule (Decoupled permissions)")
-    void approveGrant_CannotCreate_Returns403() throws Exception {
-        mockMvc.perform(post("/api/v1/finance/rules")
-                        .with(withJwt("ADMIN:202", "finance:rules:approve"))
+    @DisplayName("SCRUM-317: Create new version endpoint requires finance:rules:create grant with ALL scope")
+    void createNewVersion_RequiresCreateGrantWithAllScope() throws Exception {
+        UUID ruleId = UUID.randomUUID();
+        RuleCatalogueResponse mockResponse = createMockResponse(ruleId, "ADMIN:101", RuleStatus.DRAFT, 2);
+        when(ruleCatalogueService.createNewVersion(eq("RULE-PRICING-V1"), any(CreateRuleVersionCommand.class), eq("ADMIN:101")))
+                .thenReturn(mockResponse);
+
+        mockMvc.perform(post("/api/v1/finance/rules/{ruleCode}/versions", "RULE-PRICING-V1")
+                        .with(withGrant("ADMIN:101", "finance:rules:create", "ALL"))
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
                                 {
-                                  "ruleCode": "RULE-PRICING-V1",
-                                  "ruleName": "Quy tắc giá v1",
-                                  "ruleType": "PRICING",
+                                  "ruleName": "Quy tắc giá v2",
                                   "parametersJson": "{}",
-                                  "effectiveFrom": "2026-06-01T00:00:00Z"
+                                  "effectiveFrom": "2026-07-01T00:00:00Z"
                                 }
                                 """))
-                .andExpect(status().isForbidden());
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.ruleVersion").value(2));
+
+        verify(ruleCatalogueService).createNewVersion(eq("RULE-PRICING-V1"), any(CreateRuleVersionCommand.class), eq("ADMIN:101"));
     }
 
     @Test
-    @DisplayName("Submit for approval requires finance:rules:submit grant")
+    @DisplayName("SCRUM-317: Submit for approval requires finance:rules:submit grant with ALL scope")
     void submitRule_RequiresSubmitGrant() throws Exception {
         UUID ruleId = UUID.randomUUID();
-        RuleCatalogueResponse mockResponse = createMockResponse(ruleId, "ADMIN:101", RuleStatus.PENDING_APPROVAL);
+        RuleCatalogueResponse mockResponse = createMockResponse(ruleId, "ADMIN:101", RuleStatus.PENDING_APPROVAL, 1);
         when(ruleCatalogueService.submitForApproval(ruleId)).thenReturn(mockResponse);
 
         mockMvc.perform(post("/api/v1/finance/rules/{id}/submit", ruleId)
-                        .with(withJwt("ADMIN:101", "finance:rules:submit")))
+                        .with(withGrant("ADMIN:101", "finance:rules:submit", "ALL")))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.status").value("PENDING_APPROVAL"));
 
@@ -192,41 +258,41 @@ class RuleCatalogueSecurityControllerTest {
     }
 
     @Test
-    @DisplayName("Approve rule passes authenticated checker actor identity from JWT")
+    @DisplayName("SCRUM-317: Approve rule requires finance:rules:approve grant with ALL scope and passes checker identity")
     void approveRule_PassesCheckerActor() throws Exception {
         UUID ruleId = UUID.randomUUID();
-        RuleCatalogueResponse mockResponse = createMockResponse(ruleId, "ADMIN:101", RuleStatus.ACTIVE);
+        RuleCatalogueResponse mockResponse = createMockResponse(ruleId, "ADMIN:101", RuleStatus.ACTIVE, 1);
         when(ruleCatalogueService.approveRule(ruleId, "ADMIN:202")).thenReturn(mockResponse);
 
         mockMvc.perform(post("/api/v1/finance/rules/{id}/approve", ruleId)
-                        .with(withJwt("ADMIN:202", "finance:rules:approve")))
+                        .with(withGrant("ADMIN:202", "finance:rules:approve", "ALL")))
                 .andExpect(status().isOk());
 
         verify(ruleCatalogueService).approveRule(ruleId, "ADMIN:202");
     }
 
     @Test
-    @DisplayName("Maker-Checker violation in service returns 409 Conflict")
+    @DisplayName("SCRUM-317: Maker-Checker violation in service returns 409 Conflict")
     void approveRule_MakerCheckerViolation_Returns409() throws Exception {
         UUID ruleId = UUID.randomUUID();
         when(ruleCatalogueService.approveRule(ruleId, "ADMIN:101"))
                 .thenThrow(new IllegalStateException("Maker-Checker violation: Creator cannot approve their own rule catalogue"));
 
         mockMvc.perform(post("/api/v1/finance/rules/{id}/approve", ruleId)
-                        .with(withJwt("ADMIN:101", "finance:rules:approve")))
+                        .with(withGrant("ADMIN:101", "finance:rules:approve", "ALL")))
                 .andExpect(status().isConflict());
     }
 
     @Test
-    @DisplayName("Reject rule requires finance:rules:reject grant and passes reviewer actor identity")
+    @DisplayName("SCRUM-317: Reject rule requires finance:rules:reject grant with ALL scope")
     void rejectRule_PassesReviewerActor() throws Exception {
         UUID ruleId = UUID.randomUUID();
-        RuleCatalogueResponse mockResponse = createMockResponse(ruleId, "ADMIN:101", RuleStatus.REJECTED);
+        RuleCatalogueResponse mockResponse = createMockResponse(ruleId, "ADMIN:101", RuleStatus.REJECTED, 1);
         when(ruleCatalogueService.rejectRule(ruleId, "ADMIN:202", "Ty le chiet khau chua phu hop"))
                 .thenReturn(mockResponse);
 
         mockMvc.perform(post("/api/v1/finance/rules/{id}/reject", ruleId)
-                        .with(withJwt("ADMIN:202", "finance:rules:reject"))
+                        .with(withGrant("ADMIN:202", "finance:rules:reject", "ALL"))
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
                                 {
@@ -239,41 +305,41 @@ class RuleCatalogueSecurityControllerTest {
     }
 
     @Test
-    @DisplayName("Archive rule requires finance:rules:archive grant")
+    @DisplayName("SCRUM-317: Archive rule requires finance:rules:archive grant with ALL scope")
     void archiveRule_RequiresArchiveGrant() throws Exception {
         UUID ruleId = UUID.randomUUID();
-        RuleCatalogueResponse mockResponse = createMockResponse(ruleId, "ADMIN:101", RuleStatus.ARCHIVED);
+        RuleCatalogueResponse mockResponse = createMockResponse(ruleId, "ADMIN:101", RuleStatus.ARCHIVED, 1);
         when(ruleCatalogueService.archiveRule(ruleId)).thenReturn(mockResponse);
 
         mockMvc.perform(post("/api/v1/finance/rules/{id}/archive", ruleId)
-                        .with(withJwt("ADMIN:202", "finance:rules:archive")))
+                        .with(withGrant("ADMIN:202", "finance:rules:archive", "ALL")))
                 .andExpect(status().isOk());
 
         verify(ruleCatalogueService).archiveRule(ruleId);
     }
 
     @Test
-    @DisplayName("Get rule by ID requires finance:rules:read grant")
+    @DisplayName("SCRUM-317: Get rule by ID requires finance:rules:read grant")
     void getRuleById_RequiresReadGrant() throws Exception {
         UUID ruleId = UUID.randomUUID();
-        RuleCatalogueResponse mockResponse = createMockResponse(ruleId, "ADMIN:101", RuleStatus.ACTIVE);
+        RuleCatalogueResponse mockResponse = createMockResponse(ruleId, "ADMIN:101", RuleStatus.ACTIVE, 1);
         when(ruleCatalogueService.getRuleById(ruleId)).thenReturn(mockResponse);
 
         mockMvc.perform(get("/api/v1/finance/rules/{id}", ruleId)
-                        .with(withJwt("ADMIN:101", "finance:rules:read")))
+                        .with(withGrant("ADMIN:101", "finance:rules:read", "ALL")))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.id").value(ruleId.toString()));
 
         verify(ruleCatalogueService).getRuleById(ruleId);
     }
 
-    private RuleCatalogueResponse createMockResponse(UUID id, String creator, RuleStatus status) {
+    private RuleCatalogueResponse createMockResponse(UUID id, String creator, RuleStatus status, int version) {
         return new RuleCatalogueResponse(
                 id,
                 "RULE-01",
                 "Rule Test",
                 RuleType.PRICING,
-                1,
+                version,
                 0,
                 "Description",
                 "{}",
@@ -290,4 +356,3 @@ class RuleCatalogueSecurityControllerTest {
         );
     }
 }
-
