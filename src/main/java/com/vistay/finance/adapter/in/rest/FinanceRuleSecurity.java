@@ -66,7 +66,7 @@ public final class FinanceRuleSecurity {
         }
         if (!hasReadGrant(jwt)) {
             throw new ResponseStatusException(HttpStatus.FORBIDDEN,
-                    "Access denied: Missing required permission grant '" + PERM_RULE_READ + "'");
+                    "Access denied: Finance rule catalogue is a global resource requiring (" + PERM_RULE_READ + " with scope " + SCOPE_ALL + ")");
         }
     }
 
@@ -113,44 +113,7 @@ public final class FinanceRuleSecurity {
     }
 
     public static boolean hasReadGrant(Jwt jwt) {
-        if (jwt == null) {
-            return false;
-        }
-
-        Object grantsObj = jwt.getClaims().get("grants");
-        if (grantsObj instanceof List<?> list) {
-            for (Object item : list) {
-                if (item instanceof Map<?, ?> map) {
-                    Object p = map.get("p");
-                    Object perm = map.get("permission");
-                    Object s = map.get("s");
-                    Object scope = map.get("scope");
-
-                    String permVal = (p != null) ? p.toString() : (perm != null ? perm.toString() : null);
-                    String scopeVal = (s != null) ? s.toString() : (scope != null ? scope.toString() : null);
-
-                    if (matchesPermission(permVal, PERM_RULE_READ) && scopeVal != null && VALID_SCOPES.contains(scopeVal.trim().toUpperCase())) {
-                        return true;
-                    }
-                }
-            }
-        }
-
-        Authentication auth = SecurityContextHolder.getContext().getAuthentication();
-        if (auth != null) {
-            for (GrantedAuthority ga : auth.getAuthorities()) {
-                String authStr = ga.getAuthority();
-                for (String scope : VALID_SCOPES) {
-                    String targetAuthority = PERM_RULE_READ + "_" + scope;
-                    if (targetAuthority.equalsIgnoreCase(authStr)
-                            || ("SCOPE_" + targetAuthority).equalsIgnoreCase(authStr)) {
-                        return true;
-                    }
-                }
-            }
-        }
-
-        return false;
+        return hasGrant(jwt, PERM_RULE_READ, SCOPE_ALL);
     }
 
     private static boolean matchesPermission(Object candidate, String target) {

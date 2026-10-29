@@ -345,4 +345,66 @@ class RuleCatalogueConcurrencyIntegrationTest {
             }
         }
     }
+
+    @Test
+    @DisplayName("SCRUM-317: Concurrent version creation on same ruleCode produces exactly 1 winner and 1 unique constraint violation")
+    void concurrentVersionCreation_ExactlyOneWinner() throws Exception {
+        UUID ruleId1 = UUID.randomUUID();
+        String ruleCode = "CONCUR-VER-" + UUID.randomUUID().toString().substring(0, 8);
+
+        // Insert version 1
+        try (Connection conn = createConnection();
+             PreparedStatement ps = conn.prepareStatement("""
+                     INSERT INTO app.finance_rule_catalogues (
+                         id, rule_code, rule_name, rule_type, rule_version, opt_lock_version,
+                         parameters_json, effective_from, status, created_by_admin_user_id
+                     ) VALUES (?, ?, 'Version 1', 'PRICING', 1, 0, '{}'::jsonb, now(), 'ACTIVE', 'ADMIN:MAKER')
+                     """)) {
+            ps.setObject(1, ruleId1);
+            ps.setString(2, ruleCode);
+            ps.executeUpdate();
+        }
+
+        int threads = 2;
+        ExecutorService executor = Executors.newFixedThreadPool(threads);
+        CountDownLatch startGate = new CountDownLatch(1);
+        CountDownLatch endGate = new CountDownLatch(threads);
+        AtomicInteger winners = new AtomicInteger(0);
+        AtomicInteger conflicts = new AtomicInteger(0);
+
+        for (int i = 0; i < threads; i++) {
+            executor.submit(() -> {
+                try {
+                    startGate.await();
+                    try (Connection conn = createConnection();
+                         PreparedStatement ps = conn.prepareStatement("""
+                                 INSERT INTO app.finance_rule_catalogues (
+                                     id, rule_code, rule_name, rule_type, rule_version, opt_lock_version,
+                                     parameters_json, effective_from, status, created_by_admin_user_id
+                                 ) VALUES (?, ?, 'Version 2 Concurrent', 'PRICING', 2, 0, '{}'::jsonb, now(), 'DRAFT', 'ADMIN:MAKER')
+                                 """)) {
+                        ps.setObject(1, UUID.randomUUID());
+                        ps.setString(2, ruleCode);
+                        ps.executeUpdate();
+                        winners.incrementAndGet();
+                    } catch (SQLException e) {
+                        if (e.getMessage() != null && e.getMessage().contains("uq_rule_catalogue_code_version")) {
+                            conflicts.incrementAndGet();
+                        }
+                    }
+                } catch (Exception ignored) {
+                } finally {
+                    endGate.countDown();
+                }
+            });
+        }
+
+        startGate.countDown();
+        boolean finished = endGate.await(10, TimeUnit.SECONDS);
+        executor.shutdown();
+
+        assertThat(finished).isTrue();
+        assertThat(winners.get()).isEqualTo(1);
+        assertThat(conflicts.get()).isEqualTo(1);
+    }
 }

@@ -5,6 +5,7 @@ import com.vistay.finance.application.service.RuleCatalogueService;
 import com.vistay.finance.domain.model.RuleStatus;
 import com.vistay.finance.domain.model.RuleType;
 import jakarta.validation.Valid;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
@@ -144,5 +145,28 @@ public class RuleCatalogueController {
     @ExceptionHandler(IllegalStateException.class)
     public ResponseEntity<Map<String, String>> handleConflict(IllegalStateException ex) {
         return ResponseEntity.status(HttpStatus.CONFLICT).body(Map.of("error", ex.getMessage()));
+    }
+
+    @ExceptionHandler(DataIntegrityViolationException.class)
+    public ResponseEntity<Map<String, String>> handleDataIntegrityViolation(DataIntegrityViolationException ex) {
+        Throwable rootCause = ex.getMostSpecificCause();
+        String rootMsg = rootCause != null ? rootCause.getMessage() : ex.getMessage();
+
+        if (rootMsg != null) {
+            if (rootMsg.contains("uq_rule_catalogue_code_version")) {
+                return ResponseEntity.status(HttpStatus.CONFLICT)
+                        .body(Map.of("error", "Conflict", "message", "Concurrent version creation conflict: this rule version already exists. Please retry."));
+            }
+            if (rootMsg.contains("ex_rule_catalogue_active_overlap")) {
+                return ResponseEntity.status(HttpStatus.CONFLICT)
+                        .body(Map.of("error", "Conflict", "message", "Overlapping active rule conflict: another active rule covers this effective time window."));
+            }
+            if (rootMsg.contains("ck_rule_maker_checker")) {
+                return ResponseEntity.status(HttpStatus.CONFLICT)
+                        .body(Map.of("error", "Conflict", "message", "Maker-Checker violation: rule creator cannot approve the rule."));
+            }
+        }
+        return ResponseEntity.status(HttpStatus.CONFLICT)
+                .body(Map.of("error", "Conflict", "message", "Data integrity conflict: " + rootMsg));
     }
 }

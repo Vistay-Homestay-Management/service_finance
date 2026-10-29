@@ -34,6 +34,17 @@ public interface RuleCatalogueRepository extends JpaRepository<RuleCatalogue, UU
 
     @Query("SELECT r FROM RuleCatalogue r " +
            "WHERE r.ruleCode = :ruleCode " +
+           "AND r.ruleType = :ruleType " +
+           "AND r.status = 'ACTIVE' " +
+           "AND r.effectiveFrom <= :at " +
+           "AND (r.effectiveTo IS NULL OR r.effectiveTo > :at) " +
+           "ORDER BY r.ruleVersion DESC")
+    List<RuleCatalogue> findActiveEffectiveRulesByTypeAndCode(@Param("ruleType") RuleType ruleType,
+                                                              @Param("ruleCode") String ruleCode,
+                                                              @Param("at") Instant at);
+
+    @Query("SELECT r FROM RuleCatalogue r " +
+           "WHERE r.ruleCode = :ruleCode " +
            "AND r.status = 'ACTIVE' " +
            "AND r.effectiveFrom <= :at " +
            "AND (r.effectiveTo IS NULL OR r.effectiveTo > :at) " +

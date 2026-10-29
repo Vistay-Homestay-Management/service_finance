@@ -7,11 +7,30 @@ import com.vistay.finance.domain.model.RuleType;
 import org.springframework.stereotype.Component;
 
 import java.math.BigDecimal;
+import java.util.Iterator;
+import java.util.Set;
 
 @Component
 public class RuleParameterValidator {
 
     private static final int MAX_PARAM_BYTES = 65536; // 64KB max
+
+    private static final Set<String> ALLOWED_PRICING_FIELDS = Set.of(
+            "currency", "weekendMultiplier", "holidayMultiplier", "seasonalMultiplier", "baseRate"
+    );
+    private static final Set<String> ALLOWED_CANCELLATION_FIELDS = Set.of(
+            "freeCancelHours", "penaltyPercentage", "penaltyNights", "noShowCutoffHour"
+    );
+    private static final Set<String> ALLOWED_DEPOSIT_FIELDS = Set.of(
+            "depositRate", "fixedDepositAmount", "holdMinutes", "currency"
+    );
+    private static final Set<String> ALLOWED_REFUND_FIELDS = Set.of(
+            "refundRate", "processingFee", "maxRefundAmount", "currency"
+    );
+    private static final Set<String> ALLOWED_SETTLEMENT_FIELDS = Set.of(
+            "commissionRate", "cleaningFeePayoutRate", "settlementCycleDays", "holdingDays", "minPayoutAmount", "currency"
+    );
+
     private final ObjectMapper objectMapper;
 
     public RuleParameterValidator(ObjectMapper objectMapper) {
@@ -48,15 +67,34 @@ public class RuleParameterValidator {
     }
 
     private void validateRuleSpecificParameters(RuleType ruleType, JsonNode root) {
-        if (ruleType == null) {
+        if (ruleType == null || root.isEmpty()) {
             return;
         }
 
+        Set<String> allowedFields = switch (ruleType) {
+            case PRICING -> ALLOWED_PRICING_FIELDS;
+            case CANCELLATION -> ALLOWED_CANCELLATION_FIELDS;
+            case DEPOSIT -> ALLOWED_DEPOSIT_FIELDS;
+            case REFUND -> ALLOWED_REFUND_FIELDS;
+            case SETTLEMENT -> ALLOWED_SETTLEMENT_FIELDS;
+        };
+
+        // 1. Strict unknown field rejection
+        Iterator<String> fieldNames = root.fieldNames();
+        while (fieldNames.hasNext()) {
+            String field = fieldNames.next();
+            if (!allowedFields.contains(field)) {
+                throw new IllegalArgumentException("Unknown parameter '" + field + "' is not permitted for rule type " + ruleType);
+            }
+        }
+
+        // 2. Value validation per rule type
         switch (ruleType) {
             case PRICING -> {
                 validatePositiveDouble(root, "weekendMultiplier");
                 validatePositiveDouble(root, "holidayMultiplier");
                 validatePositiveDouble(root, "seasonalMultiplier");
+                validateNonNegativeDecimal(root, "baseRate");
                 validateCurrency(root, "currency");
             }
             case CANCELLATION -> {
@@ -69,16 +107,21 @@ public class RuleParameterValidator {
                 validatePercentageRate(root, "depositRate", 1.0);
                 validateNonNegativeDecimal(root, "fixedDepositAmount");
                 validatePositiveInt(root, "holdMinutes");
+                validateCurrency(root, "currency");
             }
             case REFUND -> {
                 validatePercentageRate(root, "refundRate", 1.0);
                 validateNonNegativeDecimal(root, "processingFee");
                 validateNonNegativeDecimal(root, "maxRefundAmount");
+                validateCurrency(root, "currency");
             }
             case SETTLEMENT -> {
                 validatePercentageRate(root, "commissionRate", 1.0);
                 validatePercentageRate(root, "cleaningFeePayoutRate", 1.0);
                 validatePositiveInt(root, "settlementCycleDays");
+                validateNonNegativeInt(root, "holdingDays");
+                validateNonNegativeDecimal(root, "minPayoutAmount");
+                validateCurrency(root, "currency");
             }
         }
     }
@@ -114,7 +157,7 @@ public class RuleParameterValidator {
         if (root.has(field)) {
             JsonNode node = root.get(field);
             if (!node.isInt() || node.asInt() < 0 || node.asInt() > 23) {
-                throw new IllegalArgumentException("Field '" + field + "' must be an hour of the day between 0 and 23");
+                throw new IllegalArgumentException("Field '" + field + "' must be a valid hour of day between 0 and 23");
             }
         }
     }
@@ -122,8 +165,12 @@ public class RuleParameterValidator {
     private void validatePercentageRate(JsonNode root, String field, double maxAllowed) {
         if (root.has(field)) {
             JsonNode node = root.get(field);
-            if (!node.isNumber() || node.asDouble() < 0.0 || node.asDouble() > maxAllowed) {
-                throw new IllegalArgumentException("Field '" + field + "' must be a rate between 0.0 and " + maxAllowed);
+            if (!node.isNumber()) {
+                throw new IllegalArgumentException("Field '" + field + "' must be a numeric percentage/rate");
+            }
+            double val = node.asDouble();
+            if (val < 0.0 || val > maxAllowed) {
+                throw new IllegalArgumentException("Field '" + field + "' must be between 0.0 and " + maxAllowed);
             }
         }
     }
@@ -131,8 +178,12 @@ public class RuleParameterValidator {
     private void validateNonNegativeDecimal(JsonNode root, String field) {
         if (root.has(field)) {
             JsonNode node = root.get(field);
-            if (!node.isNumber() || node.decimalValue().compareTo(BigDecimal.ZERO) < 0) {
-                throw new IllegalArgumentException("Field '" + field + "' must be a non-negative number (>= 0)");
+            if (!node.isNumber()) {
+                throw new IllegalArgumentException("Field '" + field + "' must be a numeric amount");
+            }
+            BigDecimal bd = new BigDecimal(node.asText());
+            if (bd.compareTo(BigDecimal.ZERO) < 0) {
+                throw new IllegalArgumentException("Field '" + field + "' cannot be negative");
             }
         }
     }
@@ -141,9 +192,8 @@ public class RuleParameterValidator {
         if (root.has(field)) {
             JsonNode node = root.get(field);
             if (!node.isTextual() || !node.asText().matches("^[A-Z]{3}$")) {
-                throw new IllegalArgumentException("Field '" + field + "' must be a 3-letter ISO-4217 uppercase currency code (e.g. VND, USD)");
+                throw new IllegalArgumentException("Field '" + field + "' must be a 3-letter uppercase ISO currency code (e.g., 'VND', 'USD')");
             }
         }
     }
 }
-

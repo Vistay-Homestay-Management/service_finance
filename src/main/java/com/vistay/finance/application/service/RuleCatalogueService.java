@@ -154,7 +154,7 @@ public class RuleCatalogueService {
         Instant checkTime = (at != null) ? at : Instant.now();
 
         if (ruleCode != null && !ruleCode.isBlank()) {
-            List<RuleCatalogue> activeByCode = ruleRepository.findActiveEffectiveRulesByCode(ruleCode.trim(), checkTime);
+            List<RuleCatalogue> activeByCode = ruleRepository.findActiveEffectiveRulesByTypeAndCode(type, ruleCode.trim(), checkTime);
             if (activeByCode.isEmpty()) {
                 return Optional.empty();
             }

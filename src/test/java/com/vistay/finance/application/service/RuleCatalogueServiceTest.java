@@ -157,6 +157,20 @@ class RuleCatalogueServiceTest {
         assertThatThrownBy(() -> service.createRule(negativeMultiplierCmd, makerAdminId))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("weekendMultiplier");
+
+        CreateRuleCatalogueCommand unknownFieldCmd = new CreateRuleCatalogueCommand(
+                "RULE-UNKNOWN-FIELD",
+                "Unknown Field Rule",
+                RuleType.PRICING,
+                "Unknown",
+                "{\"unknownFinancialParam\": 999.0}",
+                Instant.now(),
+                null
+        );
+
+        assertThatThrownBy(() -> service.createRule(unknownFieldCmd, makerAdminId))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("Unknown parameter 'unknownFinancialParam'");
     }
 
     @Test
@@ -343,13 +357,26 @@ class RuleCatalogueServiceTest {
         rule.submitForApproval();
         rule.approve(checkerAdminId);
 
-        when(ruleRepository.findActiveEffectiveRulesByCode(eq("RULE-SETTLE-ACTIVE"), any(Instant.class)))
+        when(ruleRepository.findActiveEffectiveRulesByTypeAndCode(eq(RuleType.SETTLEMENT), eq("RULE-SETTLE-ACTIVE"), any(Instant.class)))
                 .thenReturn(List.of(rule));
 
         Optional<RuleCatalogueResponse> result = service.getActiveEffectiveRule(RuleType.SETTLEMENT, "RULE-SETTLE-ACTIVE", now);
 
         assertThat(result).isPresent();
         assertThat(result.get().ruleCode()).isEqualTo("RULE-SETTLE-ACTIVE");
+    }
+
+    @Test
+    @DisplayName("SCRUM-317: Lấy quy tắc ACTIVE theo code nhưng sai type trả về empty (không nhầm lẫn type)")
+    void getActiveEffectiveRule_ByCode_TypeMismatch_ReturnsEmpty() {
+        Instant now = Instant.now();
+
+        when(ruleRepository.findActiveEffectiveRulesByTypeAndCode(eq(RuleType.PRICING), eq("RULE-SETTLE-ACTIVE"), any(Instant.class)))
+                .thenReturn(List.of());
+
+        Optional<RuleCatalogueResponse> result = service.getActiveEffectiveRule(RuleType.PRICING, "RULE-SETTLE-ACTIVE", now);
+
+        assertThat(result).isEmpty();
     }
 
     @Test

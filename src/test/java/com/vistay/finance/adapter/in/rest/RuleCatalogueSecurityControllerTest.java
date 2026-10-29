@@ -319,7 +319,23 @@ class RuleCatalogueSecurityControllerTest {
     }
 
     @Test
-    @DisplayName("SCRUM-317: Get rule by ID requires finance:rules:read grant")
+    @DisplayName("SCRUM-317: Get rule by ID requires finance:rules:read grant with ALL scope; non-ALL scope is rejected with 403")
+    void getRuleById_RejectsNonAllScopeWith403() throws Exception {
+        UUID ruleId = UUID.randomUUID();
+
+        // BRANCH scope is rejected because rule catalogue is a global resource
+        mockMvc.perform(get("/api/v1/finance/rules/{id}", ruleId)
+                        .with(withGrant("ADMIN:101", "finance:rules:read", "BRANCH")))
+                .andExpect(status().isForbidden());
+
+        // OWN scope is also rejected
+        mockMvc.perform(get("/api/v1/finance/rules/{id}", ruleId)
+                        .with(withGrant("ADMIN:101", "finance:rules:read", "OWN")))
+                .andExpect(status().isForbidden());
+    }
+
+    @Test
+    @DisplayName("SCRUM-317: Get rule by ID requires finance:rules:read grant with ALL scope")
     void getRuleById_RequiresReadGrant() throws Exception {
         UUID ruleId = UUID.randomUUID();
         RuleCatalogueResponse mockResponse = createMockResponse(ruleId, "ADMIN:101", RuleStatus.ACTIVE, 1);
