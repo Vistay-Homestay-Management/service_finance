@@ -25,6 +25,12 @@ spring:
     baseline-on-migrate: false
     out-of-order: false
     validate-on-migrate: true
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          issuer-uri: ${JWT_ISSUER:http://identity.localhost/realms/vistay-backoffice}
+          jwk-set-uri: ${JWT_JWKS_URI:http://keycloak:8080/realms/vistay-backoffice/protocol/openid-connect/certs}
   graphql:
     http:
       path: /graphql
@@ -67,6 +73,10 @@ management:
       probes:
         enabled: true
       show-details: never
+
+vistay:
+  security:
+    audience: ${JWT_AUDIENCE:vistay-backoffice-api}
 
 logging:
   structured:
