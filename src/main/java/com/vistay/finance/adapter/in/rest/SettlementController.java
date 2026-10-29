@@ -31,7 +31,8 @@ public class SettlementController {
     public ResponseEntity<SettlementPeriodResponse> openSettlementPeriod(
             @AuthenticationPrincipal Jwt jwt,
             @Valid @RequestBody OpenSettlementPeriodCommand command) {
-        var actor = requireSensitive(jwt, FinanceOperationalAuthorization.SETTLEMENT_CREATE);
+        var actor = requireSensitiveProperty(jwt,
+                FinanceOperationalAuthorization.SETTLEMENT_CREATE, command.propertyId());
         var boundCommand = new OpenSettlementPeriodCommand(command.hostId(), command.propertyId(),
                 command.startDate(), command.endDate(), command.dueDate(), command.currency(),
                 authorization.bindActor(actor, command.openedByAdminUserId()), command.notes());
@@ -43,8 +44,9 @@ public class SettlementController {
     public ResponseEntity<SettlementPeriodResponse> getSettlementPeriod(
             @AuthenticationPrincipal Jwt jwt,
             @PathVariable UUID id) {
-        requireSensitive(jwt, FinanceOperationalAuthorization.SETTLEMENT_READ);
-        return ResponseEntity.ok(settlementPeriodService.getSettlementPeriod(id));
+        var access = requireSensitivePeriod(jwt,
+                FinanceOperationalAuthorization.SETTLEMENT_READ, id);
+        return ResponseEntity.ok(access.period());
     }
 
     @PostMapping("/{id}/calculate")
@@ -52,7 +54,7 @@ public class SettlementController {
             @AuthenticationPrincipal Jwt jwt,
             @PathVariable UUID id,
             @Valid @RequestBody CalculateSettlementCommand command) {
-        requireSensitive(jwt, FinanceOperationalAuthorization.SETTLEMENT_UPDATE);
+        requireSensitivePeriod(jwt, FinanceOperationalAuthorization.SETTLEMENT_UPDATE, id);
         return ResponseEntity.ok(settlementPeriodService.calculateSettlement(id, command));
     }
 
@@ -61,7 +63,8 @@ public class SettlementController {
             @AuthenticationPrincipal Jwt jwt,
             @PathVariable UUID id,
             @Valid @RequestBody AddAdjustmentCommand command) {
-        var actor = requireSensitive(jwt, FinanceOperationalAuthorization.SETTLEMENT_UPDATE);
+        var actor = requireSensitivePeriod(jwt,
+                FinanceOperationalAuthorization.SETTLEMENT_UPDATE, id).actor();
         var boundCommand = new AddAdjustmentCommand(command.adjustmentType(), command.amount(),
                 command.currency(), command.reason(),
                 authorization.bindActor(actor, command.createdByAdminUserId()));
@@ -72,7 +75,7 @@ public class SettlementController {
     public ResponseEntity<SettlementPeriodResponse> submitForApproval(
             @AuthenticationPrincipal Jwt jwt,
             @PathVariable UUID id) {
-        requireSensitive(jwt, FinanceOperationalAuthorization.SETTLEMENT_UPDATE);
+        requireSensitivePeriod(jwt, FinanceOperationalAuthorization.SETTLEMENT_UPDATE, id);
         return ResponseEntity.ok(settlementPeriodService.submitForApproval(id));
     }
 
@@ -81,7 +84,8 @@ public class SettlementController {
             @AuthenticationPrincipal Jwt jwt,
             @PathVariable UUID id,
             @Valid @RequestBody MakerCheckerApprovalCommand command) {
-        var actor = requireSensitive(jwt, FinanceOperationalAuthorization.SETTLEMENT_APPROVE);
+        var actor = requireSensitivePeriod(jwt,
+                FinanceOperationalAuthorization.SETTLEMENT_APPROVE, id).actor();
         var boundCommand = new MakerCheckerApprovalCommand(
                 authorization.bindActor(actor, command.approverAdminUserId()), command.notes());
         return ResponseEntity.ok(settlementPeriodService.approve(id, boundCommand));
@@ -93,7 +97,8 @@ public class SettlementController {
             @PathVariable UUID id,
             @Valid @RequestBody MakerCheckerApprovalCommand command,
             @RequestParam(required = false, defaultValue = "Rejected by reviewer") String reason) {
-        var actor = requireSensitive(jwt, FinanceOperationalAuthorization.SETTLEMENT_APPROVE);
+        var actor = requireSensitivePeriod(jwt,
+                FinanceOperationalAuthorization.SETTLEMENT_APPROVE, id).actor();
         var boundCommand = new MakerCheckerApprovalCommand(
                 authorization.bindActor(actor, command.approverAdminUserId()), command.notes());
         return ResponseEntity.ok(settlementPeriodService.reject(id, boundCommand, reason));
@@ -105,7 +110,8 @@ public class SettlementController {
             @PathVariable UUID id,
             @RequestParam(required = false) UUID adminUserId,
             @RequestParam(required = false, defaultValue = "Reopened for correction") String reason) {
-        var actor = requireSensitive(jwt, FinanceOperationalAuthorization.SETTLEMENT_UPDATE);
+        var actor = requireSensitivePeriod(jwt,
+                FinanceOperationalAuthorization.SETTLEMENT_UPDATE, id).actor();
         return ResponseEntity.ok(settlementPeriodService.reopen(id,
                 authorization.bindActor(actor, adminUserId), reason));
     }
@@ -115,7 +121,8 @@ public class SettlementController {
             @AuthenticationPrincipal Jwt jwt,
             @PathVariable UUID id,
             @RequestParam(required = false) UUID adminUserId) {
-        var actor = requireSensitive(jwt, FinanceOperationalAuthorization.SETTLEMENT_PAYOUT);
+        var actor = requireSensitivePeriod(jwt,
+                FinanceOperationalAuthorization.SETTLEMENT_PAYOUT, id).actor();
         return ResponseEntity.status(HttpStatus.CREATED).body(settlementPeriodService.createPayable(id,
                 authorization.bindActor(actor, adminUserId)));
     }
@@ -125,7 +132,8 @@ public class SettlementController {
             @AuthenticationPrincipal Jwt jwt,
             @PathVariable UUID id,
             @Valid @RequestBody RecordPayoutCommand command) {
-        var actor = requireSensitive(jwt, FinanceOperationalAuthorization.SETTLEMENT_PAYOUT);
+        var actor = requireSensitivePeriod(jwt,
+                FinanceOperationalAuthorization.SETTLEMENT_PAYOUT, id).actor();
         var boundCommand = new RecordPayoutCommand(command.amount(), command.paymentReference(),
                 command.notes(), authorization.bindActor(actor, command.processedByAdminUserId()));
         return ResponseEntity.ok(settlementPeriodService.recordPayout(id, boundCommand));
@@ -149,10 +157,25 @@ public class SettlementController {
         return ResponseEntity.ok(settlementPeriodService.exportDashboard(fromDate, toDate));
     }
 
-    private FinanceOperationalAuthorization.Actor requireSensitive(Jwt jwt, String actionPermission) {
-        var actor = authorization.requireAll(jwt, actionPermission);
-        authorization.requireAll(jwt, FinanceOperationalAuthorization.FINANCE_READ);
-        return actor;
+    private FinanceOperationalAuthorization.Actor requireSensitiveProperty(
+            Jwt jwt, String actionPermission, UUID propertyId) {
+        var actionActor = authorization.require(jwt, actionPermission);
+        var readActor = authorization.require(jwt, FinanceOperationalAuthorization.FINANCE_READ);
+        authorization.requireProperty(propertyId, actionActor, readActor);
+        return actionActor;
     }
+
+    private AuthorizedSettlement requireSensitivePeriod(
+            Jwt jwt, String actionPermission, UUID periodId) {
+        var actionActor = authorization.require(jwt, actionPermission);
+        var readActor = authorization.require(jwt, FinanceOperationalAuthorization.FINANCE_READ);
+        var period = settlementPeriodService.getSettlementPeriod(periodId);
+        authorization.requireProperty(period.propertyId(), actionActor, readActor);
+        return new AuthorizedSettlement(actionActor, period);
+    }
+
+    private record AuthorizedSettlement(
+            FinanceOperationalAuthorization.Actor actor,
+            SettlementPeriodResponse period) {}
 }
 

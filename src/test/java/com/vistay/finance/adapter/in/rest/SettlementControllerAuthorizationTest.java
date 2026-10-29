@@ -17,10 +17,14 @@ import com.vistay.finance.application.dto.CalculateSettlementCommand;
 import com.vistay.finance.application.dto.MakerCheckerApprovalCommand;
 import com.vistay.finance.application.dto.OpenSettlementPeriodCommand;
 import com.vistay.finance.application.dto.RecordPayoutCommand;
+import com.vistay.finance.application.dto.SettlementPeriodResponse;
 import com.vistay.finance.application.service.SettlementPeriodService;
 import com.vistay.finance.domain.model.AdjustmentType;
+import com.vistay.finance.domain.model.SettlementStatus;
 import java.math.BigDecimal;
+import java.time.Instant;
 import java.time.LocalDate;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
@@ -37,12 +41,16 @@ class SettlementControllerAuthorizationTest {
     private final Jwt jwt = mock(Jwt.class);
     private final UUID profileId = UUID.randomUUID();
     private final UUID periodId = UUID.randomUUID();
+    private final UUID propertyId = UUID.randomUUID();
     private final FinanceOperationalAuthorization.Actor actor = actor();
 
     @Test
     void mapsEveryEndpointToExactActionAndSensitiveFieldPermissions() {
+        when(authorization.require(eq(jwt), anyString())).thenReturn(actor);
         when(authorization.requireAll(eq(jwt), anyString())).thenReturn(actor);
         when(authorization.bindActor(actor, null)).thenReturn(profileId);
+        var period = periodResponse();
+        when(service.getSettlementPeriod(periodId)).thenReturn(period);
 
         controller.openSettlementPeriod(jwt, openCommand(null));
         controller.getSettlementPeriod(jwt, periodId);
@@ -58,20 +66,24 @@ class SettlementControllerAuthorizationTest {
         controller.getDashboardSummary(jwt);
         controller.exportDashboard(jwt, null, null);
 
-        verify(authorization).requireAll(jwt, FinanceOperationalAuthorization.SETTLEMENT_CREATE);
-        verify(authorization).requireAll(jwt, FinanceOperationalAuthorization.SETTLEMENT_READ);
-        verify(authorization, times(4)).requireAll(jwt, FinanceOperationalAuthorization.SETTLEMENT_UPDATE);
-        verify(authorization, times(2)).requireAll(jwt, FinanceOperationalAuthorization.SETTLEMENT_APPROVE);
-        verify(authorization, times(2)).requireAll(jwt, FinanceOperationalAuthorization.SETTLEMENT_PAYOUT);
+        verify(authorization).require(jwt, FinanceOperationalAuthorization.SETTLEMENT_CREATE);
+        verify(authorization).require(jwt, FinanceOperationalAuthorization.SETTLEMENT_READ);
+        verify(authorization, times(4)).require(jwt, FinanceOperationalAuthorization.SETTLEMENT_UPDATE);
+        verify(authorization, times(2)).require(jwt, FinanceOperationalAuthorization.SETTLEMENT_APPROVE);
+        verify(authorization, times(2)).require(jwt, FinanceOperationalAuthorization.SETTLEMENT_PAYOUT);
+        verify(authorization, times(10)).require(jwt, FinanceOperationalAuthorization.FINANCE_READ);
+        verify(authorization, times(10)).requireProperty(propertyId, actor, actor);
         verify(authorization).requireAll(jwt, FinanceOperationalAuthorization.SETTLEMENT_EXPORT);
         verify(authorization).requireAll(jwt, FinanceOperationalAuthorization.FINANCE_EXPORT);
-        verify(authorization, times(12)).requireAll(jwt, FinanceOperationalAuthorization.FINANCE_READ);
+        verify(authorization, times(2)).requireAll(jwt, FinanceOperationalAuthorization.FINANCE_READ);
     }
 
     @Test
     void replacesEveryClientSuppliedActorWithAuthenticatedProfile() {
-        when(authorization.requireAll(eq(jwt), anyString())).thenReturn(actor);
+        when(authorization.require(eq(jwt), anyString())).thenReturn(actor);
         when(authorization.bindActor(actor, null)).thenReturn(profileId);
+        var period = periodResponse();
+        when(service.getSettlementPeriod(periodId)).thenReturn(period);
 
         controller.openSettlementPeriod(jwt, openCommand(null));
         controller.addAdjustment(jwt, periodId, adjustmentCommand(null));
@@ -96,7 +108,7 @@ class SettlementControllerAuthorizationTest {
 
     @Test
     void deniesBeforeMutationWhenActionPermissionIsMissing() {
-        when(authorization.requireAll(jwt, FinanceOperationalAuthorization.SETTLEMENT_CREATE))
+        when(authorization.require(jwt, FinanceOperationalAuthorization.SETTLEMENT_CREATE))
             .thenThrow(new ResponseStatusException(HttpStatus.FORBIDDEN, "missing permission"));
 
         assertThatThrownBy(() -> controller.openSettlementPeriod(jwt, openCommand(null)))
@@ -106,7 +118,7 @@ class SettlementControllerAuthorizationTest {
     }
 
     private OpenSettlementPeriodCommand openCommand(UUID actorId) {
-        return new OpenSettlementPeriodCommand(UUID.randomUUID(), UUID.randomUUID(),
+        return new OpenSettlementPeriodCommand(UUID.randomUUID(), propertyId,
             LocalDate.of(2026, 10, 1), LocalDate.of(2026, 10, 31),
             LocalDate.of(2026, 11, 5), "VND", actorId, "monthly");
     }
@@ -114,6 +126,16 @@ class SettlementControllerAuthorizationTest {
     private AddAdjustmentCommand adjustmentCommand(UUID actorId) {
         return new AddAdjustmentCommand(AdjustmentType.MANUAL_CREDIT, BigDecimal.ONE,
             "VND", "correction", actorId);
+    }
+
+    private SettlementPeriodResponse periodResponse() {
+        return new SettlementPeriodResponse(
+            periodId, "SET-TEST", UUID.randomUUID(), propertyId,
+            LocalDate.of(2026, 10, 1), LocalDate.of(2026, 10, 31),
+            LocalDate.of(2026, 11, 5),
+            BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO,
+            BigDecimal.ZERO, "VND", SettlementStatus.OPEN, profileId, null, null,
+            "monthly", null, Instant.now(), Instant.now(), List.of(), List.of());
     }
 
     private FinanceOperationalAuthorization.Actor actor() {

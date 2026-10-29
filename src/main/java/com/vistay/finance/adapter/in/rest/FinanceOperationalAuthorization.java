@@ -6,6 +6,8 @@ import com.vistay.finance.application.FinanceAuthorizationClient.Scope;
 import com.vistay.finance.application.FinanceAuthorizationClient.Snapshot;
 import com.vistay.finance.application.FinanceBookingAuthorizationClient;
 import com.vistay.finance.application.FinanceBookingAuthorizationClient.BookingAuthorizationException;
+import com.vistay.finance.application.FinancePropertyPartitionClient;
+import com.vistay.finance.application.FinancePropertyPartitionClient.PropertyPartitionException;
 import java.util.UUID;
 import org.springframework.http.HttpStatus;
 import org.springframework.security.oauth2.jwt.Jwt;
@@ -31,13 +33,16 @@ public class FinanceOperationalAuthorization {
 
     private final FinanceAuthorizationClient authorizations;
     private final FinanceBookingAuthorizationClient bookings;
+    private final FinancePropertyPartitionClient propertyPartitions;
 
     public FinanceOperationalAuthorization(
         FinanceAuthorizationClient authorizations,
-        FinanceBookingAuthorizationClient bookings
+        FinanceBookingAuthorizationClient bookings,
+        FinancePropertyPartitionClient propertyPartitions
     ) {
         this.authorizations = authorizations;
         this.bookings = bookings;
+        this.propertyPartitions = propertyPartitions;
     }
 
     public Actor require(Jwt jwt, String permission) {
@@ -88,6 +93,47 @@ public class FinanceOperationalAuthorization {
                 permission + " requires ALL scope until an authoritative record resolver is available");
         }
         return actor;
+    }
+
+    public void requireProperty(Actor actor, UUID propertyId) {
+        requireProperty(propertyId, actor);
+    }
+
+    public void requireProperty(UUID propertyId, Actor... actors) {
+        boolean resolutionRequired = false;
+        for (var actor : actors) {
+            var scopes = actor.snapshot().scopes(actor.permission());
+            if (scopes.contains(Scope.ALL)) {
+                continue;
+            }
+            if (!scopes.contains(Scope.PARTITION)) {
+                throw forbidden(actor.permission());
+            }
+            resolutionRequired = true;
+        }
+        if (!resolutionRequired) {
+            return;
+        }
+        try {
+            var resolution = propertyPartitions.resolve(propertyId);
+            if (!resolution.mapped()) {
+                throw forbidden(actors[0].permission());
+            }
+            for (var actor : actors) {
+                if (actor.snapshot().scopes(actor.permission()).contains(Scope.ALL)) {
+                    continue;
+                }
+                boolean granted = actor.snapshot().partitions(actor.permission()).stream()
+                    .anyMatch(binding -> "BRANCH".equals(binding.partitionType())
+                        && resolution.branchId().equals(binding.partitionId()));
+                if (!granted) {
+                    throw forbidden(actor.permission());
+                }
+            }
+        } catch (PropertyPartitionException unavailable) {
+            throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE,
+                unavailable.getMessage(), unavailable);
+        }
     }
 
     public UUID bindActor(Actor actor, UUID suppliedAdminUserId) {

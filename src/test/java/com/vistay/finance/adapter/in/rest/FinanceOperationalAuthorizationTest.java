@@ -12,9 +12,12 @@ import com.vistay.finance.application.FinanceAuthorizationClient;
 import com.vistay.finance.application.FinanceAuthorizationClient.AuthorizationException;
 import com.vistay.finance.application.FinanceAuthorizationClient.Scope;
 import com.vistay.finance.application.FinanceAuthorizationClient.Snapshot;
+import com.vistay.finance.application.FinanceAuthorizationClient.PartitionBinding;
 import com.vistay.finance.application.FinanceBookingAuthorizationClient;
 import com.vistay.finance.application.FinanceBookingAuthorizationClient.BookingAuthorizationException;
 import com.vistay.finance.application.FinanceBookingAuthorizationClient.BookingRecord;
+import com.vistay.finance.application.FinancePropertyPartitionClient;
+import com.vistay.finance.application.FinancePropertyPartitionClient.PropertyPartitionException;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
@@ -29,8 +32,9 @@ class FinanceOperationalAuthorizationTest {
     private static final String PERMISSION = FinanceOperationalAuthorization.PAYMENT_READ;
     private final FinanceAuthorizationClient snapshots = mock(FinanceAuthorizationClient.class);
     private final FinanceBookingAuthorizationClient bookings = mock(FinanceBookingAuthorizationClient.class);
+    private final FinancePropertyPartitionClient propertyPartitions = mock(FinancePropertyPartitionClient.class);
     private final FinanceOperationalAuthorization authorization =
-        new FinanceOperationalAuthorization(snapshots, bookings);
+        new FinanceOperationalAuthorization(snapshots, bookings, propertyPartitions);
     private final UUID accountId = UUID.randomUUID();
     private final UUID profileId = UUID.randomUUID();
     private final UUID bookingId = UUID.randomUUID();
@@ -63,10 +67,40 @@ class FinanceOperationalAuthorizationTest {
     }
 
     @Test
-    void ownAndPartitionHaveNoPositiveFallback() {
+    void ownHasNoPositiveFallbackForBookingRecords() {
         assertForbidden(() -> authorization.requireBooking(actor(Scope.OWN), bookingId));
-        assertForbidden(() -> authorization.requireBooking(actor(Scope.PARTITION), bookingId));
         verify(bookings, never()).get(bookingId);
+    }
+
+    @Test
+    void propertyPartitionAcceptsOnlyTheMappedGrantedBranch() {
+        var propertyId = UUID.randomUUID();
+        var branchId = UUID.randomUUID();
+        when(propertyPartitions.resolve(propertyId)).thenReturn(
+            FinancePropertyPartitionClient.Resolution.mapped(branchId, 4));
+
+        var granted = partitionActor(branchId);
+        assertThatCode(() -> authorization.requireProperty(
+            propertyId, granted, granted)).doesNotThrowAnyException();
+        verify(propertyPartitions).resolve(propertyId);
+        assertForbidden(() -> authorization.requireProperty(
+            partitionActor(UUID.randomUUID()), propertyId));
+    }
+
+    @Test
+    void missingPropertyMappingIsForbiddenAndDependencyFailureIsUnavailable() {
+        var propertyId = UUID.randomUUID();
+        when(propertyPartitions.resolve(propertyId))
+            .thenReturn(FinancePropertyPartitionClient.Resolution.missing())
+            .thenThrow(new PropertyPartitionException(
+                "PROPERTY_PARTITION_UNAVAILABLE", "unavailable"));
+
+        assertForbidden(() -> authorization.requireProperty(
+            partitionActor(UUID.randomUUID()), propertyId));
+        assertThatThrownBy(() -> authorization.requireProperty(
+            partitionActor(UUID.randomUUID()), propertyId))
+            .isInstanceOfSatisfying(ResponseStatusException.class,
+                error -> assertThat(error.getStatusCode()).isEqualTo(HttpStatus.SERVICE_UNAVAILABLE));
     }
 
     @Test
@@ -111,6 +145,13 @@ class FinanceOperationalAuthorizationTest {
 
     private FinanceOperationalAuthorization.Actor actor(Scope scope) {
         return new FinanceOperationalAuthorization.Actor(accountId, profileId, PERMISSION, snapshot(scope));
+    }
+
+    private FinanceOperationalAuthorization.Actor partitionActor(UUID branchId) {
+        var snapshot = new Snapshot(true, profileId, 7,
+            Map.of(PERMISSION, Set.of(Scope.PARTITION)),
+            Map.of(PERMISSION, Set.of(new PartitionBinding("BRANCH", branchId))));
+        return new FinanceOperationalAuthorization.Actor(accountId, profileId, PERMISSION, snapshot);
     }
 
     private Snapshot snapshot(Scope scope) {
