@@ -25,6 +25,12 @@ spring:
     baseline-on-migrate: false
     out-of-order: false
     validate-on-migrate: true
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          issuer-uri: ${JWT_ISSUER:http://identity.localhost/realms/vistay-backoffice}
+          jwk-set-uri: ${JWT_JWKS_URI:http://keycloak:8080/realms/vistay-backoffice/protocol/openid-connect/certs}
   graphql:
     http:
       path: /graphql
@@ -43,9 +49,38 @@ spring:
       properties:
         enable.idempotence: true
     consumer:
+      group-id: vistay-finance-payment-confirmed-v1
       enable-auto-commit: false
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
       properties:
         isolation.level: read_committed
+  grpc:
+    server:
+      port: ${GRPC_SERVER_PORT:9090}
+    client:
+      channel:
+        user:
+          target: ${USER_GRPC_ADDRESS:static://localhost:9091}
+          ssl:
+            bundle: ${USER_GRPC_SSL_BUNDLE:grpc-user-client}
+        booking:
+          target: ${BOOKING_GRPC_ADDRESS:static://localhost:9092}
+          ssl:
+            bundle: ${BOOKING_GRPC_SSL_BUNDLE:grpc-user-client}
+        property:
+          target: ${PROPERTY_GRPC_ADDRESS:static://localhost:9093}
+          ssl:
+            bundle: ${PROPERTY_GRPC_SSL_BUNDLE:grpc-user-client}
+  ssl:
+    bundle:
+      pem:
+        grpc-user-client:
+          keystore:
+            certificate: ${GRPC_CLIENT_CERT:file:/run/secrets/grpc/finance.crt}
+            private-key: ${GRPC_CLIENT_KEY:file:/run/secrets/grpc/finance.key}
+          truststore:
+            certificate: ${GRPC_SERVER_CA_CERT:file:/run/secrets/grpc/ca.crt}
 
 server:
   port: ${SERVER_PORT:8080}
@@ -61,6 +96,15 @@ management:
       probes:
         enabled: true
       show-details: never
+
+vistay:
+  security:
+    audience: ${JWT_AUDIENCE:vistay-backoffice-api}
+  topics:
+    authorization-changed: ${AUTHORIZATION_CHANGED_TOPIC:vistay.user.authorization-changed.v1}
+  authorization:
+    local-cache-ttl: ${AUTHORIZATION_LOCAL_CACHE_TTL:30s}
+    grpc-deadline: ${AUTHORIZATION_GRPC_DEADLINE:2s}
 
 logging:
   structured:
