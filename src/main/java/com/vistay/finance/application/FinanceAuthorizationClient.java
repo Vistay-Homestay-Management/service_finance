@@ -1,6 +1,6 @@
 package com.vistay.finance.application;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
+import tools.jackson.databind.ObjectMapper;
 import com.vistay.contracts.common.v1.AccountRef;
 import com.vistay.contracts.common.v1.AccountType;
 import com.vistay.contracts.common.v1.DataScopeType;

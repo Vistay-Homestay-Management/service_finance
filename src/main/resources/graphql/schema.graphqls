@@ -1,9 +1,22 @@
 type Query {
   financeServiceInfo: FinanceServiceInfo!
+  financeDashboardSummary: FinanceDashboardSummary!
+}
+
+type FinanceDashboardSummary {
+  totalGrossRevenue: String!
+  totalCommissionEarned: String!
+  totalCleaningFees: String!
+  totalAdjustments: String!
+  totalNetPayoutCalculated: String!
+  totalPayableOutstanding: String!
+  totalPayablePaid: String!
+  totalSettlementCount: Int!
+  approvedSettlementCount: Int!
+  paidSettlementCount: Int!
 }
 
 type FinanceServiceInfo {
   name: String!
   version: String!
 }
-

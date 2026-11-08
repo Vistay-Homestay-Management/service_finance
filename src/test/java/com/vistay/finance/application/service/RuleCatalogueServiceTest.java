@@ -1,6 +1,6 @@
 package com.vistay.finance.application.service;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
+import tools.jackson.databind.ObjectMapper;
 import com.vistay.finance.application.dto.*;
 import com.vistay.finance.application.validation.RuleParameterValidator;
 import com.vistay.finance.domain.model.RuleCatalogue;

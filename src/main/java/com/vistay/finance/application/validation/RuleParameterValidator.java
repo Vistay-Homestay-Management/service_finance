@@ -1,13 +1,12 @@
 package com.vistay.finance.application.validation;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import tools.jackson.core.JacksonException;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.ObjectMapper;
 import com.vistay.finance.domain.model.RuleType;
 import org.springframework.stereotype.Component;
 
 import java.math.BigDecimal;
-import java.util.Iterator;
 import java.util.Set;
 
 @Component
@@ -49,7 +48,7 @@ public class RuleParameterValidator {
         JsonNode root;
         try {
             root = objectMapper.readTree(parametersJson);
-        } catch (JsonProcessingException e) {
+        } catch (JacksonException e) {
             throw new IllegalArgumentException("Malformed JSON parameters: " + e.getMessage(), e);
         }
 
@@ -61,7 +60,7 @@ public class RuleParameterValidator {
 
         try {
             return objectMapper.writeValueAsString(root);
-        } catch (JsonProcessingException e) {
+        } catch (JacksonException e) {
             return parametersJson.trim();
         }
     }
@@ -80,9 +79,7 @@ public class RuleParameterValidator {
         };
 
         // 1. Strict unknown field rejection
-        Iterator<String> fieldNames = root.fieldNames();
-        while (fieldNames.hasNext()) {
-            String field = fieldNames.next();
+        for (String field : root.propertyNames()) {
             if (!allowedFields.contains(field)) {
                 throw new IllegalArgumentException("Unknown parameter '" + field + "' is not permitted for rule type " + ruleType);
             }
