@@ -1,22 +1,29 @@
 SET search_path TO app, extensions, public;
 
-CREATE TABLE IF NOT EXISTS finance_command_idempotency (
+-- Canonical command idempotency ledger for finance commands
+CREATE TABLE finance_command_idempotency (
     idempotency_key varchar(160) PRIMARY KEY,
     command_type varchar(80) NOT NULL,
-    actor_type varchar(24) NOT NULL CHECK (actor_type IN ('ADMIN', 'CUSTOMER', 'SYSTEM')),
+    actor_type varchar(24) NOT NULL,
     actor_id uuid NOT NULL,
     request_hash char(64) NOT NULL,
-    status varchar(24) NOT NULL CHECK (status IN ('PROCESSING', 'SUCCEEDED', 'FAILED')),
+    status varchar(24) NOT NULL,
     resource_type varchar(64),
     resource_id uuid,
     response_payload jsonb,
     error_code varchar(80),
     expires_at timestamptz NOT NULL,
     created_at timestamptz NOT NULL DEFAULT now(),
-    completed_at timestamptz
+    completed_at timestamptz,
+    CONSTRAINT ck_command_idempotency_actor CHECK (actor_type IN ('ADMIN', 'CUSTOMER', 'SYSTEM')),
+    CONSTRAINT ck_command_idempotency_status CHECK (status IN ('PROCESSING', 'SUCCEEDED', 'FAILED')),
+    CONSTRAINT ck_finance_cmd_idem_payload CHECK (response_payload IS NULL OR jsonb_typeof(response_payload) = 'object')
 );
 
-CREATE TABLE IF NOT EXISTS reservation_deposit_assessments (
+CREATE INDEX ix_command_idempotency_expiry ON finance_command_idempotency(status, expires_at);
+
+-- SCRUM-718: Reservation deposit assessments
+CREATE TABLE reservation_deposit_assessments (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     target_key varchar(120) NOT NULL,
     booking_id uuid,
@@ -53,13 +60,13 @@ CREATE TABLE IF NOT EXISTS reservation_deposit_assessments (
     )
 );
 
-CREATE UNIQUE INDEX IF NOT EXISTS ux_deposit_assessment_current 
+CREATE UNIQUE INDEX ux_deposit_assessment_current 
     ON reservation_deposit_assessments(target_key) 
     WHERE is_current = true;
 
-CREATE INDEX IF NOT EXISTS idx_deposit_assessment_property 
+CREATE INDEX idx_deposit_assessment_property 
     ON reservation_deposit_assessments(property_id);
 
-CREATE INDEX IF NOT EXISTS idx_deposit_assessment_booking 
+CREATE INDEX idx_deposit_assessment_booking 
     ON reservation_deposit_assessments(booking_id) 
     WHERE booking_id IS NOT NULL;

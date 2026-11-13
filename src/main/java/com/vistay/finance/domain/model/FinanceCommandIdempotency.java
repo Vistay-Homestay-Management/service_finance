@@ -1,11 +1,20 @@
 package com.vistay.finance.domain.model;
 
 import jakarta.persistence.*;
+import org.hibernate.annotations.JdbcTypeCode;
+import org.hibernate.type.SqlTypes;
+
 import java.time.Instant;
 import java.util.UUID;
 
 @Entity
-@Table(name = "finance_command_idempotency", schema = "app")
+@Table(
+    name = "finance_command_idempotency",
+    schema = "app",
+    indexes = {
+        @Index(name = "ix_command_idempotency_expiry", columnList = "status, expires_at")
+    }
+)
 public class FinanceCommandIdempotency {
 
     @Id
@@ -24,8 +33,9 @@ public class FinanceCommandIdempotency {
     @Column(name = "request_hash", length = 64, nullable = false)
     private String requestHash;
 
+    @Enumerated(EnumType.STRING)
     @Column(name = "status", length = 24, nullable = false)
-    private String status;
+    private CommandIdempotencyStatus status;
 
     @Column(name = "resource_type", length = 64)
     private String resourceType;
@@ -33,6 +43,7 @@ public class FinanceCommandIdempotency {
     @Column(name = "resource_id")
     private UUID resourceId;
 
+    @JdbcTypeCode(SqlTypes.JSON)
     @Column(name = "response_payload", columnDefinition = "jsonb")
     private String responsePayload;
 
@@ -56,7 +67,23 @@ public class FinanceCommandIdempotency {
                                      String actorType,
                                      UUID actorId,
                                      String requestHash,
-                                     String status,
+                                     Instant expiresAt) {
+        this.idempotencyKey = idempotencyKey;
+        this.commandType = commandType;
+        this.actorType = actorType;
+        this.actorId = actorId;
+        this.requestHash = requestHash;
+        this.status = CommandIdempotencyStatus.PROCESSING;
+        this.expiresAt = expiresAt;
+        this.createdAt = Instant.now();
+    }
+
+    public FinanceCommandIdempotency(String idempotencyKey,
+                                     String commandType,
+                                     String actorType,
+                                     UUID actorId,
+                                     String requestHash,
+                                     CommandIdempotencyStatus status,
                                      String resourceType,
                                      UUID resourceId,
                                      String responsePayload,
@@ -76,25 +103,53 @@ public class FinanceCommandIdempotency {
         this.createdAt = Instant.now();
     }
 
+    public FinanceCommandIdempotency(String idempotencyKey,
+                                     String commandType,
+                                     String actorType,
+                                     UUID actorId,
+                                     String requestHash,
+                                     String status,
+                                     String resourceType,
+                                     UUID resourceId,
+                                     String responsePayload,
+                                     String errorCode,
+                                     Instant expiresAt) {
+        this(idempotencyKey, commandType, actorType, actorId, requestHash,
+             CommandIdempotencyStatus.valueOf(status), resourceType, resourceId, responsePayload, errorCode, expiresAt);
+    }
+
     public void markSucceeded(String responsePayload, UUID resourceId) {
-        this.status = "SUCCEEDED";
+        this.status = CommandIdempotencyStatus.SUCCEEDED;
         this.responsePayload = responsePayload;
         this.resourceId = resourceId;
         this.completedAt = Instant.now();
     }
 
+    public void markSucceeded(String resourceType, UUID resourceId, String responsePayload) {
+        this.status = CommandIdempotencyStatus.SUCCEEDED;
+        this.resourceType = resourceType;
+        this.resourceId = resourceId;
+        this.responsePayload = responsePayload;
+        this.completedAt = Instant.now();
+    }
+
     public void markFailed(String errorCode) {
-        this.status = "FAILED";
+        this.status = CommandIdempotencyStatus.FAILED;
         this.errorCode = errorCode;
         this.completedAt = Instant.now();
     }
+
+    public boolean isProcessing() { return status == CommandIdempotencyStatus.PROCESSING; }
+    public boolean isSucceeded() { return status == CommandIdempotencyStatus.SUCCEEDED; }
+    public boolean isFailed() { return status == CommandIdempotencyStatus.FAILED; }
 
     public String getIdempotencyKey() { return idempotencyKey; }
     public String getCommandType() { return commandType; }
     public String getActorType() { return actorType; }
     public UUID getActorId() { return actorId; }
     public String getRequestHash() { return requestHash; }
-    public String getStatus() { return status; }
+    public CommandIdempotencyStatus getStatus() { return status; }
+    public String getStatusAsString() { return status != null ? status.name() : null; }
     public String getResourceType() { return resourceType; }
     public UUID getResourceId() { return resourceId; }
     public String getResponsePayload() { return responsePayload; }
