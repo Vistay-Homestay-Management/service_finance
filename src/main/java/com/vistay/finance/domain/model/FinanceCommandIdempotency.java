@@ -1,9 +1,6 @@
 package com.vistay.finance.domain.model;
 
 import jakarta.persistence.*;
-import org.hibernate.annotations.JdbcTypeCode;
-import org.hibernate.type.SqlTypes;
-
 import java.time.Instant;
 import java.util.UUID;
 
@@ -18,24 +15,23 @@ import java.util.UUID;
 public class FinanceCommandIdempotency {
 
     @Id
-    @Column(name = "idempotency_key", nullable = false, length = 160)
+    @Column(name = "idempotency_key", length = 160, nullable = false)
     private String idempotencyKey;
 
-    @Column(name = "command_type", nullable = false, length = 80)
+    @Column(name = "command_type", length = 80, nullable = false)
     private String commandType;
 
-    @Column(name = "actor_type", nullable = false, length = 24)
+    @Column(name = "actor_type", length = 24, nullable = false)
     private String actorType;
 
     @Column(name = "actor_id", nullable = false)
     private UUID actorId;
 
-    @Column(name = "request_hash", nullable = false, length = 64)
+    @Column(name = "request_hash", length = 64, nullable = false)
     private String requestHash;
 
-    @Enumerated(EnumType.STRING)
-    @Column(name = "status", nullable = false, length = 24)
-    private CommandIdempotencyStatus status;
+    @Column(name = "status", length = 24, nullable = false)
+    private String status;
 
     @Column(name = "resource_type", length = 64)
     private String resourceType;
@@ -43,7 +39,6 @@ public class FinanceCommandIdempotency {
     @Column(name = "resource_id")
     private UUID resourceId;
 
-    @JdbcTypeCode(SqlTypes.JSON)
     @Column(name = "response_payload", columnDefinition = "jsonb")
     private String responsePayload;
 
@@ -59,28 +54,49 @@ public class FinanceCommandIdempotency {
     @Column(name = "completed_at")
     private Instant completedAt;
 
-    protected FinanceCommandIdempotency() {}
+    protected FinanceCommandIdempotency() {
+    }
 
-    public FinanceCommandIdempotency(
-        String idempotencyKey,
-        String commandType,
-        String actorType,
-        UUID actorId,
-        String requestHash,
-        Instant expiresAt
-    ) {
+    public FinanceCommandIdempotency(String idempotencyKey,
+                                     String commandType,
+                                     String actorType,
+                                     UUID actorId,
+                                     String requestHash,
+                                     String status,
+                                     String resourceType,
+                                     UUID resourceId,
+                                     String responsePayload,
+                                     String errorCode,
+                                     Instant expiresAt) {
         this.idempotencyKey = idempotencyKey;
         this.commandType = commandType;
         this.actorType = actorType;
         this.actorId = actorId;
         this.requestHash = requestHash;
-        this.status = CommandIdempotencyStatus.PROCESSING;
+        this.status = status;
+        this.resourceType = resourceType;
+        this.resourceId = resourceId;
+        this.responsePayload = responsePayload;
+        this.errorCode = errorCode;
         this.expiresAt = expiresAt;
         this.createdAt = Instant.now();
     }
 
+    public FinanceCommandIdempotency(String idempotencyKey,
+                                     String commandType,
+                                     String actorType,
+                                     UUID actorId,
+                                     String requestHash,
+                                     Instant expiresAt) {
+        this(idempotencyKey, commandType, actorType, actorId, requestHash, "PROCESSING", null, null, null, null, expiresAt);
+    }
+
+    public void markSucceeded(String responsePayload, UUID resourceId) {
+        markSucceeded(null, resourceId, responsePayload);
+    }
+
     public void markSucceeded(String resourceType, UUID resourceId, String responsePayload) {
-        this.status = CommandIdempotencyStatus.SUCCEEDED;
+        this.status = "SUCCEEDED";
         this.resourceType = resourceType;
         this.resourceId = resourceId;
         this.responsePayload = responsePayload;
@@ -88,17 +104,21 @@ public class FinanceCommandIdempotency {
     }
 
     public void markFailed(String errorCode) {
-        this.status = CommandIdempotencyStatus.FAILED;
+        this.status = "FAILED";
         this.errorCode = errorCode;
         this.completedAt = Instant.now();
     }
+
+    public boolean isProcessing() { return "PROCESSING".equalsIgnoreCase(status); }
+    public boolean isSucceeded() { return "SUCCEEDED".equalsIgnoreCase(status); }
+    public boolean isFailed() { return "FAILED".equalsIgnoreCase(status); }
 
     public String getIdempotencyKey() { return idempotencyKey; }
     public String getCommandType() { return commandType; }
     public String getActorType() { return actorType; }
     public UUID getActorId() { return actorId; }
     public String getRequestHash() { return requestHash; }
-    public CommandIdempotencyStatus getStatus() { return status; }
+    public String getStatus() { return status; }
     public String getResourceType() { return resourceType; }
     public UUID getResourceId() { return resourceId; }
     public String getResponsePayload() { return responsePayload; }

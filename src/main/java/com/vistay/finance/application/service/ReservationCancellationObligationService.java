@@ -152,14 +152,14 @@ public class ReservationCancellationObligationService {
         Optional<FinanceCommandIdempotency> existingIdempotency = idempotencyRepository.findByIdempotencyKey(cmd.idempotencyKey());
         if (existingIdempotency.isPresent()) {
             FinanceCommandIdempotency idemp = existingIdempotency.get();
-            if (idemp.getStatus() == CommandIdempotencyStatus.SUCCEEDED) {
+            if (idemp.isSucceeded()) {
                 if (!idemp.getRequestHash().equals(requestHash)) {
                     throw new IllegalStateException("IDEMPOTENCY_KEY_REUSED: Idempotency key reused with different request payload");
                 }
                 return obligationRepository.findByCancellationQuoteId(cmd.cancellationQuoteId())
                     .map(CancellationObligationResponse::from)
                     .orElseThrow(() -> new IllegalStateException("Stored obligation not found for idempotency key"));
-            } else if (idemp.getStatus() == CommandIdempotencyStatus.PROCESSING) {
+            } else if (idemp.isProcessing()) {
                 throw new IllegalStateException("CONCURRENT_OPERATION: Operation currently processing for idempotency key: " + cmd.idempotencyKey());
             }
         }

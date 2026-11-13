@@ -4,10 +4,10 @@ SET search_path TO app, extensions, public;
 CREATE TABLE IF NOT EXISTS finance_command_idempotency (
     idempotency_key varchar(160) PRIMARY KEY,
     command_type varchar(80) NOT NULL,
-    actor_type varchar(24) NOT NULL,
+    actor_type varchar(24) NOT NULL CHECK (actor_type IN ('ADMIN', 'CUSTOMER', 'SYSTEM')),
     actor_id uuid NOT NULL,
     request_hash char(64) NOT NULL,
-    status varchar(24) NOT NULL,
+    status varchar(24) NOT NULL CHECK (status IN ('PROCESSING', 'SUCCEEDED', 'FAILED')),
     resource_type varchar(64),
     resource_id uuid,
     response_payload jsonb,
@@ -15,11 +15,22 @@ CREATE TABLE IF NOT EXISTS finance_command_idempotency (
     expires_at timestamptz NOT NULL,
     created_at timestamptz NOT NULL DEFAULT now(),
     completed_at timestamptz,
-    CONSTRAINT ck_command_idempotency_actor CHECK (actor_type IN ('ADMIN', 'CUSTOMER', 'SYSTEM')),
-    CONSTRAINT ck_command_idempotency_status CHECK (status IN ('PROCESSING', 'SUCCEEDED', 'FAILED')),
     CONSTRAINT ck_command_idempotency_payload CHECK (response_payload IS NULL OR jsonb_typeof(response_payload) = 'object')
 );
 
+-- Ensure payload check constraint exists even if table was created by another migration without it
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint 
+        WHERE conname IN ('ck_command_idempotency_payload', 'ck_finance_cmd_idem_payload')
+    ) THEN
+        ALTER TABLE finance_command_idempotency
+        ADD CONSTRAINT ck_command_idempotency_payload CHECK (response_payload IS NULL OR jsonb_typeof(response_payload) = 'object');
+    END IF;
+END $$;
+
+-- Ensure expiry index exists regardless of migration order
 CREATE INDEX IF NOT EXISTS ix_command_idempotency_expiry ON finance_command_idempotency(status, expires_at);
 
 -- SCRUM-569: Finance cancellation obligation ledger

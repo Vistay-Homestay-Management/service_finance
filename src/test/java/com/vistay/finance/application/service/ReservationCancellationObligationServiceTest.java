@@ -166,7 +166,7 @@ class ReservationCancellationObligationServiceTest {
 
         verify(refundRepository).save(any(Refund.class));
         verify(obligationRepository).save(any(ReservationCancellationObligation.class));
-        verify(idempotencyRepository, atLeastOnce()).save(argThat(i -> i.getStatus() == CommandIdempotencyStatus.SUCCEEDED));
+        verify(idempotencyRepository, atLeastOnce()).save(argThat(i -> "SUCCEEDED".equalsIgnoreCase(i.getStatus())));
     }
 
     @Test

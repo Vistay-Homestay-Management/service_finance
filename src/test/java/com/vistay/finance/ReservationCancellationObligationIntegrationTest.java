@@ -63,8 +63,8 @@ class ReservationCancellationObligationIntegrationTest {
     }
 
     @Test
-    @DisplayName("SCRUM-569: V5 migration table structure and constraints exist in PostgreSQL")
-    void v5Migration_TableStructureAndIndexesExist() throws Exception {
+    @DisplayName("SCRUM-569: V7 migration table structure and constraints exist in PostgreSQL")
+    void v7Migration_TableStructureAndIndexesExist() throws Exception {
         try (Connection conn = createConnection();
              PreparedStatement ps = conn.prepareStatement("""
                      SELECT column_name, data_type, is_nullable
@@ -96,6 +96,28 @@ class ReservationCancellationObligationIntegrationTest {
                 assertThat(foundRefundable).isTrue();
                 assertThat(foundForfeited).isTrue();
                 assertThat(foundStatus).isTrue();
+            }
+        }
+
+        // Verify finance_command_idempotency unified table, payload constraint and expiry index
+        try (Connection conn = createConnection();
+             PreparedStatement ps = conn.prepareStatement("""
+                     SELECT conname FROM pg_constraint
+                     WHERE conname IN ('ck_command_idempotency_payload', 'ck_finance_cmd_idem_payload')
+                     """)) {
+            try (ResultSet rs = ps.executeQuery()) {
+                assertThat(rs.next()).isTrue();
+            }
+        }
+
+        try (Connection conn = createConnection();
+             PreparedStatement ps = conn.prepareStatement("""
+                     SELECT indexname FROM pg_indexes
+                     WHERE schemaname = 'app' AND tablename = 'finance_command_idempotency'
+                       AND indexname = 'ix_command_idempotency_expiry'
+                     """)) {
+            try (ResultSet rs = ps.executeQuery()) {
+                assertThat(rs.next()).isTrue();
             }
         }
     }
