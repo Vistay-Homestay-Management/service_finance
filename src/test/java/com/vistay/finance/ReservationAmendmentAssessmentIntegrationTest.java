@@ -71,8 +71,8 @@ class ReservationAmendmentAssessmentIntegrationTest {
     }
 
     @Test
-    @DisplayName("V5 Migration: Verifies schema and indexes for amendment assessments and idempotency")
-    void verifyV5TablesAndIndexes() throws Exception {
+    @DisplayName("V6 Migration: Verifies schema and indexes for amendment assessments and idempotency")
+    void verifyV6TablesAndIndexes() throws Exception {
         try (Connection conn = createConnection();
              PreparedStatement ps = conn.prepareStatement("""
                  SELECT column_name, data_type
@@ -217,12 +217,13 @@ class ReservationAmendmentAssessmentIntegrationTest {
         try (Connection conn = createConnection()) {
             // Create baseline booking payment request & succeeded payment transaction
             try (PreparedStatement ps = conn.prepareStatement("""
-                INSERT INTO app.payment_requests(id, booking_id, payer_type, payer_id, amount, currency, description, idempotency_key, status)
-                VALUES (?, ?, 'CUSTOMER', ?, 5000000, 'VND', 'Initial deposit', 'req-1', 'PAID')
+                INSERT INTO app.payment_requests(id, request_code, booking_id, payer_type, payer_id, amount, currency, purpose, idempotency_key, status)
+                VALUES (?, ?, ?, 'CUSTOMER', ?, 5000000, 'VND', 'Initial deposit', 'req-1', 'PAID')
                 """)) {
                 ps.setObject(1, paymentRequestId);
-                ps.setObject(2, bookingId);
-                ps.setObject(3, customerId);
+                ps.setString(2, "REQ-" + UUID.randomUUID().toString().substring(0, 8).toUpperCase());
+                ps.setObject(3, bookingId);
+                ps.setObject(4, customerId);
                 ps.executeUpdate();
             }
 

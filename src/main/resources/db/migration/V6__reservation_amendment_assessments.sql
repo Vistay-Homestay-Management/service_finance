@@ -13,8 +13,7 @@ CREATE TABLE IF NOT EXISTS finance_command_idempotency (
     error_code varchar(80),
     expires_at timestamptz NOT NULL,
     created_at timestamptz NOT NULL DEFAULT now(),
-    completed_at timestamptz,
-    CONSTRAINT ck_finance_cmd_idem_payload CHECK (response_payload IS NULL OR jsonb_typeof(response_payload) = 'object')
+    completed_at timestamptz
 );
 
 CREATE TABLE IF NOT EXISTS reservation_amendment_assessments (
