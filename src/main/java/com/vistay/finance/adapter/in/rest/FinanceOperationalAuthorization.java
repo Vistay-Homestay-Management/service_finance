@@ -29,7 +29,10 @@ public class FinanceOperationalAuthorization {
     public static final String SETTLEMENT_PAYOUT = "settlement:payout";
     public static final String SETTLEMENT_EXPORT = "settlement:export";
     public static final String FINANCE_READ = "finance:read";
-    public static final String FINANCE_EXPORT = "finance:export";
+    public static final String FINANCE_EXPORT = "finance:export";
+    public static final String CANCELLATION_ASSESS = "finance:cancellation:assess";
+    public static final String REFUND_CREATE = "finance:refund:create";
+    public static final String RESERVATION_DECISION_VIEW = "finance:reservation-decision:view";
 
     private final FinanceAuthorizationClient authorizations;
     private final FinanceBookingAuthorizationClient bookings;
