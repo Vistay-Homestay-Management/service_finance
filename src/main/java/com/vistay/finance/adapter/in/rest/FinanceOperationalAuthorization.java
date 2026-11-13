@@ -30,6 +30,9 @@ public class FinanceOperationalAuthorization {
     public static final String SETTLEMENT_EXPORT = "settlement:export";
     public static final String FINANCE_READ = "finance:read";
     public static final String FINANCE_EXPORT = "finance:export";
+    public static final String RESERVATION_AMENDMENT_ASSESS = "finance:reservation-amendment:assess";
+    public static final String RESERVATION_DECISION_VIEW = "finance:reservation-decision:view";
+    public static final String DEPOSIT_WAIVE = "finance:deposit:waive";
 
     private final FinanceAuthorizationClient authorizations;
     private final FinanceBookingAuthorizationClient bookings;
@@ -134,6 +137,35 @@ public class FinanceOperationalAuthorization {
             throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE,
                 unavailable.getMessage(), unavailable);
         }
+    }
+
+    public void requireReservationAccess(Actor actor, UUID bookingId, UUID propertyId, UUID ownerCustomerId) {
+        var scopes = actor.snapshot().scopes(actor.permission());
+        if (scopes.contains(Scope.ALL)) {
+            return;
+        }
+        if (scopes.contains(Scope.ASSIGNED) && bookingId != null) {
+            try {
+                if (bookings.get(bookingId).isAssignedTo(actor.profileId())) {
+                    return;
+                }
+            } catch (BookingAuthorizationException failure) {
+                if ("BOOKING_AUTHORIZATION_UNAVAILABLE".equals(failure.code())) {
+                    throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE, failure.getMessage());
+                }
+            }
+        }
+        if (scopes.contains(Scope.PARTITION) && propertyId != null) {
+            requireProperty(actor, propertyId);
+            return;
+        }
+        if (scopes.contains(Scope.SELF)) {
+            if (ownerCustomerId != null && ownerCustomerId.equals(actor.profileId())) {
+                return;
+            }
+            throw forbidden(actor.permission());
+        }
+        throw forbidden(actor.permission());
     }
 
     public UUID bindActor(Actor actor, UUID suppliedAdminUserId) {
