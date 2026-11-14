@@ -110,13 +110,13 @@ class ReservationDepositAssessmentControllerTest {
     }
 
     @Test
-    @DisplayName("Decision endpoint requires finance:deposit:read and returns active decision")
+    @DisplayName("Decision endpoint requires finance:reservation-decision:view and returns active decision")
     void getDecision_requiresPermissionAndReturnsDecision() {
         var controller = new ReservationDepositAssessmentController(service, authorization);
-        var actor = actor(ReservationDepositAssessmentController.DEPOSIT_READ);
+        var actor = actor(ReservationDepositAssessmentController.RESERVATION_DECISION_VIEW);
 
         DepositAssessmentResponse mockResponse = dummyResponse("booking:" + bookingId, DepositAssessmentStatus.VERIFIED_PAID);
-        when(authorization.require(jwt, ReservationDepositAssessmentController.DEPOSIT_READ)).thenReturn(actor);
+        when(authorization.require(jwt, ReservationDepositAssessmentController.RESERVATION_DECISION_VIEW)).thenReturn(actor);
         when(service.getCurrentDecision("booking:" + bookingId)).thenReturn(mockResponse);
 
         var response = controller.getDecision(jwt, "booking:" + bookingId, null);

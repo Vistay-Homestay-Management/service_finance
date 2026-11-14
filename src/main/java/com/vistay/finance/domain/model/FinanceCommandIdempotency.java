@@ -110,6 +110,10 @@ public class FinanceCommandIdempotency {
         this.completedAt = Instant.now();
     }
 
+    public void markSucceeded(UUID resourceId, String responsePayload) {
+        markSucceeded("RESERVATION_DEPOSIT_ASSESSMENT", resourceId, responsePayload);
+    }
+
     public void markSucceeded(String resourceType, UUID resourceId, String responsePayload) {
         this.status = CommandIdempotencyStatus.SUCCEEDED;
         this.resourceType = resourceType;

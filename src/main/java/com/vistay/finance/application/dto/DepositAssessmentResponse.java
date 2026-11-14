@@ -88,12 +88,12 @@ public record DepositAssessmentResponse(
                 null,
                 null,
                 requiredAmount,
-                collectedVerifiedAmount,
+                null, // collectedVerifiedAmount redacted: FINANCIAL field group requires explicit grant
                 currency,
                 waiverMode,
                 null,
                 null,
-                waiverApprovedAt,
+                null, // waiverApprovedAt redacted: INTERNAL_AUDIT field group requires explicit grant
                 status,
                 expiresAt,
                 null,

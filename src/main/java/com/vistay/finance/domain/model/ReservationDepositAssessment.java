@@ -176,6 +176,15 @@ public class ReservationDepositAssessment {
         if (reason == null || reason.isBlank()) {
             throw new IllegalArgumentException("Waiver reason cannot be blank");
         }
+        if (this.status == DepositAssessmentStatus.PENDING) {
+            throw new IllegalStateException("Cannot waive an assessment in PENDING status without resolved deposit policy");
+        }
+        if (this.status == DepositAssessmentStatus.FAILED) {
+            throw new IllegalStateException("Cannot waive a failed deposit assessment");
+        }
+        if (this.status == DepositAssessmentStatus.WAIVED_FINAL) {
+            throw new IllegalStateException("Assessment is already in final waived state");
+        }
         if (this.status == DepositAssessmentStatus.VERIFIED_PAID) {
             throw new IllegalStateException("Cannot waive a deposit that has already been verified and paid");
         }
