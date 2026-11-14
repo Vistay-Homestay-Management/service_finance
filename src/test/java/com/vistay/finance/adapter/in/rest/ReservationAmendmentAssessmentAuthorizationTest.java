@@ -76,6 +76,8 @@ class ReservationAmendmentAssessmentAuthorizationTest {
             .thenReturn(new Snapshot(true, profileId, 1L, Map.of(
                 FinanceOperationalAuthorization.RESERVATION_AMENDMENT_ASSESS, Set.of(Scope.ALL)
             ), Map.of()));
+        when(bookingClient.get(bookingId))
+            .thenReturn(new BookingRecord(bookingId, propertyId, Set.of(profileId)));
 
         var before = dummySnapshot();
         var after = dummySnapshot();
@@ -90,7 +92,7 @@ class ReservationAmendmentAssessmentAuthorizationTest {
         var res = controller.assessAmendment(jwt, cmd, null);
 
         assertThat(res.getStatusCode()).isEqualTo(HttpStatus.CREATED);
-        verify(bookingClient, never()).get(any());
+        verify(bookingClient).get(bookingId);
         verify(propertyPartitionClient, never()).resolve(any());
     }
 

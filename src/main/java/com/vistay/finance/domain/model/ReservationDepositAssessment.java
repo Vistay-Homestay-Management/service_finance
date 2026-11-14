@@ -38,7 +38,8 @@ public class ReservationDepositAssessment {
     @Column(name = "is_current", nullable = false)
     private boolean isCurrent = true;
 
-    @Column(name = "input_fingerprint", nullable = false, length = 64)
+    @JdbcTypeCode(SqlTypes.CHAR)
+    @Column(name = "input_fingerprint", nullable = false, length = 64, columnDefinition = "char(64)")
     private String inputFingerprint;
 
     @Column(name = "rule_catalogue_id")

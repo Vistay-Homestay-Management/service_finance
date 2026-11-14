@@ -30,6 +30,8 @@ public class FinanceOperationalAuthorization {
     public static final String SETTLEMENT_EXPORT = "settlement:export";
     public static final String FINANCE_READ = "finance:read";
     public static final String FINANCE_EXPORT = "finance:export";
+    public static final String CANCELLATION_ASSESS = "finance:cancellation:assess";
+    public static final String REFUND_CREATE = "finance:refund:create";
     public static final String RESERVATION_AMENDMENT_ASSESS = "finance:reservation-amendment:assess";
     public static final String RESERVATION_DECISION_VIEW = "finance:reservation-decision:view";
     public static final String DEPOSIT_WAIVE = "finance:deposit:waive";
@@ -139,29 +141,56 @@ public class FinanceOperationalAuthorization {
         }
     }
 
-    public void requireReservationAccess(Actor actor, UUID bookingId, UUID propertyId, UUID ownerCustomerId) {
+    public FinanceBookingAuthorizationClient.BookingRecord requireReservationAccess(
+        Actor actor,
+        UUID bookingId,
+        UUID suppliedPropertyId,
+        UUID ownerCustomerId
+    ) {
         var scopes = actor.snapshot().scopes(actor.permission());
-        if (scopes.contains(Scope.ALL)) {
-            return;
-        }
-        if (scopes.contains(Scope.ASSIGNED) && bookingId != null) {
+        FinanceBookingAuthorizationClient.BookingRecord booking = null;
+        if (bookingId != null) {
             try {
-                if (bookings.get(bookingId).isAssignedTo(actor.profileId())) {
-                    return;
-                }
+                booking = bookings.get(bookingId);
             } catch (BookingAuthorizationException failure) {
                 if ("BOOKING_AUTHORIZATION_UNAVAILABLE".equals(failure.code())) {
                     throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE, failure.getMessage());
                 }
+                throw forbidden(actor.permission());
             }
         }
-        if (scopes.contains(Scope.PARTITION) && propertyId != null) {
-            requireProperty(actor, propertyId);
-            return;
+
+        // Authoritative property resolution: enforce binding to actual booking property
+        UUID authoritativePropertyId = booking != null && booking.propertyId() != null
+            ? booking.propertyId()
+            : suppliedPropertyId;
+
+        // If caller supplied a propertyId that contradicts the authoritative booking property, reject immediately!
+        if (booking != null && booking.propertyId() != null && suppliedPropertyId != null
+            && !suppliedPropertyId.equals(booking.propertyId())) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN,
+                "Supplied property ID does not match authoritative reservation property");
+        }
+
+        UUID authoritativeCustomerId = booking != null && booking.customerId() != null
+            ? booking.customerId()
+            : ownerCustomerId;
+
+        if (scopes.contains(Scope.ALL)) {
+            return booking;
+        }
+        if (scopes.contains(Scope.ASSIGNED) && booking != null) {
+            if (booking.isAssignedTo(actor.profileId())) {
+                return booking;
+            }
+        }
+        if (scopes.contains(Scope.PARTITION) && authoritativePropertyId != null) {
+            requireProperty(actor, authoritativePropertyId);
+            return booking;
         }
         if (scopes.contains(Scope.SELF)) {
-            if (ownerCustomerId != null && ownerCustomerId.equals(actor.profileId())) {
-                return;
+            if (authoritativeCustomerId != null && authoritativeCustomerId.equals(actor.profileId())) {
+                return booking;
             }
             throw forbidden(actor.permission());
         }
@@ -191,7 +220,6 @@ public class FinanceOperationalAuthorization {
 
         return java.util.Set.copyOf(allowed);
     }
-
     public UUID bindActor(Actor actor, UUID suppliedAdminUserId) {
         if (suppliedAdminUserId != null && !suppliedAdminUserId.equals(actor.profileId())) {
             throw new ResponseStatusException(HttpStatus.FORBIDDEN,

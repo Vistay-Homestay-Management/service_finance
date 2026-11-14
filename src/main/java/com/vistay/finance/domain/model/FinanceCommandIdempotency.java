@@ -30,7 +30,8 @@ public class FinanceCommandIdempotency {
     @Column(name = "actor_id", nullable = false)
     private UUID actorId;
 
-    @Column(name = "request_hash", length = 64, nullable = false)
+    @JdbcTypeCode(SqlTypes.CHAR)
+    @Column(name = "request_hash", length = 64, nullable = false, columnDefinition = "char(64)")
     private String requestHash;
 
     @Enumerated(EnumType.STRING)
@@ -113,7 +114,6 @@ public class FinanceCommandIdempotency {
     public void markSucceeded(UUID resourceId, String responsePayload) {
         markSucceeded("RESERVATION_DEPOSIT_ASSESSMENT", resourceId, responsePayload);
     }
-
     public void markSucceeded(String resourceType, UUID resourceId, String responsePayload) {
         this.status = CommandIdempotencyStatus.SUCCEEDED;
         this.resourceType = resourceType;
