@@ -70,4 +70,37 @@ public record DepositAssessmentResponse(
                 entity.getUpdatedAt()
         );
     }
+
+    public DepositAssessmentResponse toSafeSummary() {
+        return new DepositAssessmentResponse(
+                id,
+                targetKey,
+                bookingId,
+                quoteId,
+                holdId,
+                propertyId,
+                customerId,
+                assessmentRevision,
+                isCurrent,
+                null,
+                ruleCatalogueId,
+                ruleVersion,
+                null,
+                null,
+                requiredAmount,
+                collectedVerifiedAmount,
+                currency,
+                waiverMode,
+                null,
+                null,
+                waiverApprovedAt,
+                status,
+                expiresAt,
+                null,
+                null,
+                version,
+                createdAt,
+                updatedAt
+        );
+    }
 }

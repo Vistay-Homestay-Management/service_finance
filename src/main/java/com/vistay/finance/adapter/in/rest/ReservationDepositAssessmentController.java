@@ -37,13 +37,10 @@ public class ReservationDepositAssessmentController {
             @Valid @RequestBody AssessDepositCommand command
     ) {
         var actor = authorization.require(jwt, DEPOSIT_ASSESS);
-        authorization.requireProperty(actor, command.propertyId());
-        if (command.bookingId() != null) {
-            authorization.requireBooking(actor, command.bookingId());
-        }
+        assessmentService.authorizeDepositAccess(actor, command.propertyId(), command.bookingId());
 
-        DepositAssessmentResponse response = assessmentService.assessDeposit(command);
-        return ResponseEntity.status(HttpStatus.CREATED).body(response);
+        DepositAssessmentResponse response = assessmentService.assessDeposit(command, actor);
+        return ResponseEntity.status(HttpStatus.CREATED).body(response.toSafeSummary());
     }
 
     @PostMapping("/waive")
@@ -52,16 +49,19 @@ public class ReservationDepositAssessmentController {
             @Valid @RequestBody WaiveDepositCommand command
     ) {
         var actor = authorization.require(jwt, DEPOSIT_WAIVE);
+        UUID boundApprover = authorization.bindActor(actor, command.approverAdminId());
         var boundCommand = new WaiveDepositCommand(
                 command.targetKey(),
-                authorization.bindActor(actor, command.approverAdminId()),
+                boundApprover,
                 command.reason(),
+                command.expectedRevision(),
+                command.expectedVersion(),
                 command.idempotencyKey(),
                 command.correlationId()
         );
 
-        DepositAssessmentResponse response = assessmentService.waiveDeposit(boundCommand);
-        return ResponseEntity.ok(response);
+        DepositAssessmentResponse response = assessmentService.waiveDeposit(boundCommand, actor);
+        return ResponseEntity.ok(response.toSafeSummary());
     }
 
     @GetMapping("/decision")
@@ -74,16 +74,12 @@ public class ReservationDepositAssessmentController {
 
         if (targetKey != null && !targetKey.isBlank()) {
             DepositAssessmentResponse response = assessmentService.getCurrentDecision(targetKey);
-            authorization.requireProperty(actor, response.propertyId());
-            if (response.bookingId() != null) {
-                authorization.requireBooking(actor, response.bookingId());
-            }
-            return ResponseEntity.ok(response);
+            assessmentService.authorizeDepositAccess(actor, response.propertyId(), response.bookingId());
+            return ResponseEntity.ok(response.toSafeSummary());
         } else if (bookingId != null) {
-            authorization.requireBooking(actor, bookingId);
             DepositAssessmentResponse response = assessmentService.getCurrentDecisionByBookingId(bookingId);
-            authorization.requireProperty(actor, response.propertyId());
-            return ResponseEntity.ok(response);
+            assessmentService.authorizeDepositAccess(actor, response.propertyId(), response.bookingId());
+            return ResponseEntity.ok(response.toSafeSummary());
         } else {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Either targetKey or bookingId must be provided");
         }

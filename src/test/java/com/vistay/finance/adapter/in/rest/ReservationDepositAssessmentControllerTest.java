@@ -22,6 +22,7 @@ import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.*;
 
 class ReservationDepositAssessmentControllerTest {
@@ -36,7 +37,7 @@ class ReservationDepositAssessmentControllerTest {
     private final UUID bookingId = UUID.randomUUID();
 
     @Test
-    @DisplayName("Assess endpoint requires finance:deposit:assess and validates property/booking scopes")
+    @DisplayName("Assess endpoint requires finance:deposit:assess and validates scopes via service")
     void assessDeposit_requiresPermissionAndValidatesScopes() {
         var controller = new ReservationDepositAssessmentController(service, authorization);
         var actor = actor(ReservationDepositAssessmentController.DEPOSIT_ASSESS);
@@ -60,30 +61,33 @@ class ReservationDepositAssessmentControllerTest {
 
         when(authorization.require(jwt, ReservationDepositAssessmentController.DEPOSIT_ASSESS)).thenReturn(actor);
         DepositAssessmentResponse mockResponse = dummyResponse(cmd.targetKey(), DepositAssessmentStatus.PAYMENT_REQUIRED);
-        when(service.assessDeposit(cmd)).thenReturn(mockResponse);
+        when(service.assessDeposit(eq(cmd), eq(actor))).thenReturn(mockResponse);
 
         var response = controller.assessDeposit(jwt, cmd);
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.CREATED);
         assertThat(response.getBody()).isNotNull();
         assertThat(response.getBody().targetKey()).isEqualTo(cmd.targetKey());
+        // Safe summary redaction verification:
+        assertThat(response.getBody().inputFingerprint()).isNull();
 
         verify(authorization).require(jwt, ReservationDepositAssessmentController.DEPOSIT_ASSESS);
-        verify(authorization).requireProperty(actor, propertyId);
-        verify(authorization).requireBooking(actor, bookingId);
-        verify(service).assessDeposit(cmd);
+        verify(service).authorizeDepositAccess(actor, propertyId, bookingId);
+        verify(service).assessDeposit(cmd, actor);
     }
 
     @Test
-    @DisplayName("Waive endpoint requires finance:deposit:waive and binds authenticated admin user")
+    @DisplayName("Waive endpoint requires finance:deposit:waive, binds actor, and projects safe summary")
     void waiveDeposit_requiresPermissionAndBindsActor() {
         var controller = new ReservationDepositAssessmentController(service, authorization);
         var actor = actor(ReservationDepositAssessmentController.DEPOSIT_WAIVE);
 
         WaiveDepositCommand input = new WaiveDepositCommand(
                 "hold:123",
-                null, // will be bound from actor
+                null,
                 "Customer waiver approved",
+                1L,
+                0L,
                 "idemp-waive-1",
                 "corr-waive"
         );
@@ -92,15 +96,16 @@ class ReservationDepositAssessmentControllerTest {
         when(authorization.bindActor(actor, null)).thenReturn(profileId);
 
         DepositAssessmentResponse mockResponse = dummyResponse("hold:123", DepositAssessmentStatus.WAIVED_FINAL);
-        when(service.waiveDeposit(any())).thenReturn(mockResponse);
+        when(service.waiveDeposit(any(), eq(actor))).thenReturn(mockResponse);
 
         var response = controller.waiveDeposit(jwt, input);
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
         assertThat(response.getBody().status()).isEqualTo(DepositAssessmentStatus.WAIVED_FINAL);
+        assertThat(response.getBody().waiverApprovedByAdminUserId()).isNull(); // Redacted in safe summary
 
         var captor = ArgumentCaptor.forClass(WaiveDepositCommand.class);
-        verify(service).waiveDeposit(captor.capture());
+        verify(service).waiveDeposit(captor.capture(), eq(actor));
         assertThat(captor.getValue().approverAdminId()).isEqualTo(profileId);
     }
 
@@ -118,8 +123,9 @@ class ReservationDepositAssessmentControllerTest {
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
         assertThat(response.getBody().status()).isEqualTo(DepositAssessmentStatus.VERIFIED_PAID);
-        verify(authorization).requireProperty(actor, propertyId);
-        verify(authorization).requireBooking(actor, bookingId);
+        assertThat(response.getBody().inputFingerprint()).isNull(); // Redacted in safe summary
+
+        verify(service).authorizeDepositAccess(actor, propertyId, bookingId);
     }
 
     private FinanceOperationalAuthorization.Actor actor(String permission) {
@@ -147,15 +153,15 @@ class ReservationDepositAssessmentControllerTest {
                 "dummy-fingerprint",
                 null,
                 1,
-                null,
-                null,
+                1L,
+                "TR-REF",
                 new BigDecimal("500000.0000"),
                 BigDecimal.ZERO,
                 "VND",
                 DepositWaiverMode.NONE,
-                null,
-                null,
-                null,
+                "Private waiver reason",
+                profileId,
+                Instant.now(),
                 status,
                 Instant.now().plusSeconds(3600),
                 "idemp-dummy",

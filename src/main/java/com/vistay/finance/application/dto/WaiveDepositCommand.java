@@ -6,6 +6,8 @@ public record WaiveDepositCommand(
         String targetKey,
         UUID approverAdminId,
         String reason,
+        Long expectedRevision,
+        Long expectedVersion,
         String idempotencyKey,
         String correlationId
 ) {
@@ -22,5 +24,15 @@ public record WaiveDepositCommand(
         if (correlationId == null || correlationId.isBlank()) {
             throw new IllegalArgumentException("Correlation ID cannot be blank");
         }
+    }
+
+    public WaiveDepositCommand(
+            String targetKey,
+            UUID approverAdminId,
+            String reason,
+            String idempotencyKey,
+            String correlationId
+    ) {
+        this(targetKey, approverAdminId, reason, null, null, idempotencyKey, correlationId);
     }
 }

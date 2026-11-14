@@ -18,7 +18,11 @@ public record AssessDepositCommand(
         String trustDecisionRef,
         Instant expiresAt,
         String idempotencyKey,
-        String correlationId
+        String correlationId,
+        UUID stayProductId,
+        UUID unitId,
+        String checkInDate,
+        String checkOutDate
 ) {
     public AssessDepositCommand {
         if (targetKey == null || targetKey.isBlank()) {
@@ -39,5 +43,26 @@ public record AssessDepositCommand(
         if (correlationId == null || correlationId.isBlank()) {
             throw new IllegalArgumentException("Correlation ID cannot be blank");
         }
+    }
+
+    public AssessDepositCommand(
+            String targetKey,
+            UUID bookingId,
+            UUID quoteId,
+            UUID holdId,
+            UUID propertyId,
+            UUID customerId,
+            BigDecimal quoteTotalAmount,
+            String currency,
+            String ruleCode,
+            Long trustInputVersion,
+            String trustDecisionRef,
+            Instant expiresAt,
+            String idempotencyKey,
+            String correlationId
+    ) {
+        this(targetKey, bookingId, quoteId, holdId, propertyId, customerId, quoteTotalAmount,
+             currency, ruleCode, trustInputVersion, trustDecisionRef, expiresAt, idempotencyKey,
+             correlationId, null, null, null, null);
     }
 }
