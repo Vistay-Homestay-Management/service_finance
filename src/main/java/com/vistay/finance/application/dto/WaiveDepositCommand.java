@@ -18,6 +18,12 @@ public record WaiveDepositCommand(
         if (reason == null || reason.isBlank()) {
             throw new IllegalArgumentException("Waiver reason cannot be blank");
         }
+        if (expectedRevision == null || expectedRevision < 1) {
+            throw new IllegalArgumentException("Expected revision is mandatory and must be >= 1");
+        }
+        if (expectedVersion == null || expectedVersion < 0) {
+            throw new IllegalArgumentException("Expected version is mandatory and must be >= 0");
+        }
         if (idempotencyKey == null || idempotencyKey.isBlank()) {
             throw new IllegalArgumentException("Idempotency key cannot be blank");
         }
@@ -25,14 +31,5 @@ public record WaiveDepositCommand(
             throw new IllegalArgumentException("Correlation ID cannot be blank");
         }
     }
-
-    public WaiveDepositCommand(
-            String targetKey,
-            UUID approverAdminId,
-            String reason,
-            String idempotencyKey,
-            String correlationId
-    ) {
-        this(targetKey, approverAdminId, reason, null, null, idempotencyKey, correlationId);
-    }
 }
+

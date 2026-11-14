@@ -342,7 +342,7 @@ class ReservationDepositAssessmentServiceTest {
         when(assessmentRepository.findByTargetKeyAndIsCurrentTrueForUpdate("hold:123")).thenReturn(Optional.of(expired));
 
         WaiveDepositCommand cmd = new WaiveDepositCommand(
-                "hold:123", adminUserId, "Reason", "idemp-waive-exp", "corr-exp"
+                "hold:123", adminUserId, "Reason", 1L, 0L, "idemp-waive-exp", "corr-exp"
         );
 
         assertThatThrownBy(() -> service.waiveDeposit(cmd))
@@ -370,7 +370,7 @@ class ReservationDepositAssessmentServiceTest {
                 .when(authorization).requireProperty(actor, propertyId);
 
         WaiveDepositCommand cmd = new WaiveDepositCommand(
-                "hold:123", adminUserId, "Cross scope waive", "idemp-waive-cross", "corr-cross"
+                "hold:123", adminUserId, "Cross scope waive", 1L, 0L, "idemp-waive-cross", "corr-cross"
         );
 
         assertThatThrownBy(() -> service.waiveDeposit(cmd, actor))
@@ -394,7 +394,7 @@ class ReservationDepositAssessmentServiceTest {
 
         // Caller expected revision 1, but database is already on revision 2
         WaiveDepositCommand cmd = new WaiveDepositCommand(
-                "hold:123", adminUserId, "Stale waiver retry", 1L, null, "idemp-waive-stale", "corr-stale"
+                "hold:123", adminUserId, "Stale waiver retry", 1L, 0L, "idemp-waive-stale", "corr-stale"
         );
 
         assertThatThrownBy(() -> service.waiveDeposit(cmd))

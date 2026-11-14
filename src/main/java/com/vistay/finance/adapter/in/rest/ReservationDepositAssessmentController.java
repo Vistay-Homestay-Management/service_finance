@@ -20,7 +20,8 @@ public class ReservationDepositAssessmentController {
 
     public static final String DEPOSIT_ASSESS = "finance:deposit:assess";
     public static final String DEPOSIT_WAIVE = "finance:deposit:waive";
-    public static final String DEPOSIT_READ = "finance:deposit:read";
+    public static final String RESERVATION_DECISION_VIEW = "finance:reservation-decision:view";
+    public static final String DEPOSIT_READ = RESERVATION_DECISION_VIEW;
 
     private final ReservationDepositAssessmentService assessmentService;
     private final FinanceOperationalAuthorization authorization;
@@ -70,7 +71,7 @@ public class ReservationDepositAssessmentController {
             @RequestParam(required = false) String targetKey,
             @RequestParam(required = false) UUID bookingId
     ) {
-        var actor = authorization.require(jwt, DEPOSIT_READ);
+        var actor = authorization.require(jwt, RESERVATION_DECISION_VIEW);
 
         if (targetKey != null && !targetKey.isBlank()) {
             DepositAssessmentResponse response = assessmentService.getCurrentDecision(targetKey);
