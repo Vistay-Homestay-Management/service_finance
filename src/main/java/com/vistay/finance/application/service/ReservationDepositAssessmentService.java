@@ -51,7 +51,7 @@ public class ReservationDepositAssessmentService {
     private final ObjectMapper objectMapper;
 
     @Autowired
-    public ReservationDepositAssessmentService(
+    ReservationDepositAssessmentService(
             ReservationDepositAssessmentRepository assessmentRepository,
             RuleCatalogueRepository ruleCatalogueRepository,
             PaymentTransactionRepository paymentTransactionRepository,
@@ -88,14 +88,11 @@ public class ReservationDepositAssessmentService {
              idempotencyRepository, authorization, null, null, null, objectMapper);
     }
 
-    public DepositAssessmentResponse assessDeposit(AssessDepositCommand cmd) {
-        return assessDeposit(cmd, null);
-    }
-
     public DepositAssessmentResponse assessDeposit(AssessDepositCommand cmd, FinanceOperationalAuthorization.Actor actor) {
+        Objects.requireNonNull(actor, "Authenticated finance actor is required");
         String commandType = "ASSESS_DEPOSIT";
-        String actorType = (actor != null && actor.permission() != null && actor.permission().startsWith("finance:")) ? "ADMIN" : "SYSTEM";
-        UUID actorId = (actor != null && actor.profileId() != null) ? actor.profileId() : (cmd.customerId() != null ? cmd.customerId() : cmd.propertyId());
+        String actorType = "ADMIN";
+        UUID actorId = Objects.requireNonNull(actor.profileId(), "Authenticated finance profile is required");
         String fingerprint = computeFingerprint(cmd);
 
         // 1. Authoritative Validation of Property and Booking
@@ -239,14 +236,11 @@ public class ReservationDepositAssessmentService {
         }
     }
 
-    public DepositAssessmentResponse waiveDeposit(WaiveDepositCommand cmd) {
-        return waiveDeposit(cmd, null);
-    }
-
     public DepositAssessmentResponse waiveDeposit(WaiveDepositCommand cmd, FinanceOperationalAuthorization.Actor actor) {
+        Objects.requireNonNull(actor, "Authenticated finance actor is required");
         String commandType = "WAIVE_DEPOSIT";
         String actorType = "ADMIN";
-        UUID actorId = (actor != null && actor.profileId() != null) ? actor.profileId() : cmd.approverAdminId();
+        UUID actorId = Objects.requireNonNull(actor.profileId(), "Authenticated finance profile is required");
         String requestHash = computeSha256("WAIVE:" + cmd.targetKey() + ":" + actorId + ":" + cmd.reason() + ":" + cmd.expectedRevision() + ":" + cmd.expectedVersion());
 
         // 1. Atomic Claim before side effects
@@ -263,9 +257,7 @@ public class ReservationDepositAssessmentService {
                     .orElseThrow(() -> new NoSuchElementException("Active deposit assessment not found for target key: " + cmd.targetKey()));
 
             // 3. Authorize Scope against Stored Record
-            if (actor != null) {
-                authorizeDepositAccess(actor, assessment.getPropertyId(), assessment.getBookingId());
-            }
+            authorizeDepositAccess(actor, assessment.getPropertyId(), assessment.getBookingId());
 
             // 4. Validate CAS: Expected Revision and Expected Version (MANDATORY)
             if (assessment.getAssessmentRevision() != cmd.expectedRevision()) {
@@ -355,7 +347,7 @@ public class ReservationDepositAssessmentService {
     }
 
     public void authorizeDepositAccess(FinanceOperationalAuthorization.Actor actor, UUID propertyId, UUID bookingId) {
-        if (actor == null) return;
+        Objects.requireNonNull(actor, "Authenticated finance actor is required");
         var scopes = actor.snapshot().scopes(actor.permission());
         if (scopes.contains(FinanceAuthorizationClient.Scope.ALL)) {
             return;

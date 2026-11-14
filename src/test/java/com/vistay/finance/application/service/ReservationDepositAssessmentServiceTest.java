@@ -144,7 +144,8 @@ class ReservationDepositAssessmentServiceTest {
                 "corr-1"
         );
 
-        DepositAssessmentResponse res = service.assessDeposit(cmd);
+        DepositAssessmentResponse res = service.assessDeposit(cmd,
+                createActor(ReservationDepositAssessmentController.DEPOSIT_ASSESS, Scope.ALL));
 
         assertThat(res.status()).isEqualTo(DepositAssessmentStatus.VERIFIED_PAID);
         assertThat(res.requiredAmount()).isEqualByComparingTo("300000.0000");
@@ -194,7 +195,8 @@ class ReservationDepositAssessmentServiceTest {
                 "corr-ref-test"
         );
 
-        DepositAssessmentResponse res = service.assessDeposit(cmd);
+        DepositAssessmentResponse res = service.assessDeposit(cmd,
+                createActor(ReservationDepositAssessmentController.DEPOSIT_ASSESS, Scope.ALL));
 
         // Required 300k, Net paid = 500k - 300k = 200k -> 200k < 300k -> PAYMENT_REQUIRED
         assertThat(res.collectedVerifiedAmount()).isEqualByComparingTo("200000.0000");
@@ -228,7 +230,8 @@ class ReservationDepositAssessmentServiceTest {
                 "corr-no-rule"
         );
 
-        DepositAssessmentResponse res = service.assessDeposit(cmd);
+        DepositAssessmentResponse res = service.assessDeposit(cmd,
+                createActor(ReservationDepositAssessmentController.DEPOSIT_ASSESS, Scope.ALL));
 
         assertThat(res.status()).isEqualTo(DepositAssessmentStatus.PENDING);
         assertThat(res.waiverMode()).isEqualTo(DepositWaiverMode.NONE);
@@ -266,7 +269,8 @@ class ReservationDepositAssessmentServiceTest {
                 "corr-3"
         );
 
-        DepositAssessmentResponse res = service.assessDeposit(cmd);
+        DepositAssessmentResponse res = service.assessDeposit(cmd,
+                createActor(ReservationDepositAssessmentController.DEPOSIT_ASSESS, Scope.ALL));
 
         assertThat(res.status()).isEqualTo(DepositAssessmentStatus.WAIVED_FINAL);
         assertThat(res.waiverMode()).isEqualTo(DepositWaiverMode.ZERO_DEPOSIT_POLICY);
@@ -305,7 +309,8 @@ class ReservationDepositAssessmentServiceTest {
                 "corr-expired"
         );
 
-        DepositAssessmentResponse res = service.assessDeposit(cmd);
+        DepositAssessmentResponse res = service.assessDeposit(cmd,
+                createActor(ReservationDepositAssessmentController.DEPOSIT_ASSESS, Scope.ALL));
         assertThat(res.status()).isEqualTo(DepositAssessmentStatus.STALE);
     }
 
@@ -345,7 +350,8 @@ class ReservationDepositAssessmentServiceTest {
                 "hold:123", adminUserId, "Reason", 1L, 0L, "idemp-waive-exp", "corr-exp"
         );
 
-        assertThatThrownBy(() -> service.waiveDeposit(cmd))
+        assertThatThrownBy(() -> service.waiveDeposit(cmd,
+                createActor(ReservationDepositAssessmentController.DEPOSIT_WAIVE, Scope.ALL)))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("CANNOT_WAIVE_EXPIRED");
     }
@@ -397,7 +403,8 @@ class ReservationDepositAssessmentServiceTest {
                 "hold:123", adminUserId, "Stale waiver retry", 1L, 0L, "idemp-waive-stale", "corr-stale"
         );
 
-        assertThatThrownBy(() -> service.waiveDeposit(cmd))
+        assertThatThrownBy(() -> service.waiveDeposit(cmd,
+                createActor(ReservationDepositAssessmentController.DEPOSIT_WAIVE, Scope.ALL)))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("STALE_REVISION");
     }
@@ -452,7 +459,8 @@ class ReservationDepositAssessmentServiceTest {
 
         when(idempotencyRepository.findByIdempotencyKey(key)).thenReturn(Optional.of(processingIdemp));
 
-        assertThatThrownBy(() -> service.assessDeposit(cmd))
+        assertThatThrownBy(() -> service.assessDeposit(cmd,
+                createActor(ReservationDepositAssessmentController.DEPOSIT_ASSESS, Scope.ALL)))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("CONCURRENT_OPERATION");
     }
