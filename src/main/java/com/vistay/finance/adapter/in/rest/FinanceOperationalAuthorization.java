@@ -30,6 +30,9 @@ public class FinanceOperationalAuthorization {
     public static final String SETTLEMENT_EXPORT = "settlement:export";
     public static final String FINANCE_READ = "finance:read";
     public static final String FINANCE_EXPORT = "finance:export";
+    public static final String RESERVATION_AMENDMENT_ASSESS = "finance:reservation-amendment:assess";
+    public static final String RESERVATION_DECISION_VIEW = "finance:reservation-decision:view";
+    public static final String DEPOSIT_WAIVE = "finance:deposit:waive";
 
     private final FinanceAuthorizationClient authorizations;
     private final FinanceBookingAuthorizationClient bookings;
@@ -134,6 +137,59 @@ public class FinanceOperationalAuthorization {
             throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE,
                 unavailable.getMessage(), unavailable);
         }
+    }
+
+    public void requireReservationAccess(Actor actor, UUID bookingId, UUID propertyId, UUID ownerCustomerId) {
+        var scopes = actor.snapshot().scopes(actor.permission());
+        if (scopes.contains(Scope.ALL)) {
+            return;
+        }
+        if (scopes.contains(Scope.ASSIGNED) && bookingId != null) {
+            try {
+                if (bookings.get(bookingId).isAssignedTo(actor.profileId())) {
+                    return;
+                }
+            } catch (BookingAuthorizationException failure) {
+                if ("BOOKING_AUTHORIZATION_UNAVAILABLE".equals(failure.code())) {
+                    throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE, failure.getMessage());
+                }
+            }
+        }
+        if (scopes.contains(Scope.PARTITION) && propertyId != null) {
+            requireProperty(actor, propertyId);
+            return;
+        }
+        if (scopes.contains(Scope.SELF)) {
+            if (ownerCustomerId != null && ownerCustomerId.equals(actor.profileId())) {
+                return;
+            }
+            throw forbidden(actor.permission());
+        }
+        throw forbidden(actor.permission());
+    }
+
+    public java.util.Set<com.vistay.finance.domain.model.ReservationFieldGroup> resolveAuthorizedFieldGroups(Actor actor) {
+        java.util.Set<com.vistay.finance.domain.model.ReservationFieldGroup> allowed = new java.util.HashSet<>();
+        allowed.add(com.vistay.finance.domain.model.ReservationFieldGroup.RESERVATION_SUMMARY);
+
+        if (actor == null || actor.snapshot() == null) {
+            return java.util.Set.copyOf(allowed);
+        }
+
+        var grants = actor.snapshot().grants();
+        // Fail-closed field group grants: requires explicit field permissions per authorization data matrix
+        // Scope.ALL or action permissions (finance:read) do not substitute for sensitive field group grants
+        if (grants.containsKey("finance:field:financial") || grants.containsKey("finance:field-group:financial")) {
+            allowed.add(com.vistay.finance.domain.model.ReservationFieldGroup.FINANCIAL);
+        }
+        if (grants.containsKey("finance:field:trust-detail") || grants.containsKey("finance:field-group:trust-detail")) {
+            allowed.add(com.vistay.finance.domain.model.ReservationFieldGroup.TRUST_DETAIL);
+        }
+        if (grants.containsKey("finance:field:internal-audit") || grants.containsKey("finance:field-group:internal-audit")) {
+            allowed.add(com.vistay.finance.domain.model.ReservationFieldGroup.INTERNAL_AUDIT);
+        }
+
+        return java.util.Set.copyOf(allowed);
     }
 
     public UUID bindActor(Actor actor, UUID suppliedAdminUserId) {
