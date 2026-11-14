@@ -82,6 +82,7 @@ public class PaymentTransaction {
     @Column(name = "description", length = 1000)
     private String description;
 
+    @org.hibernate.annotations.JdbcTypeCode(org.hibernate.type.SqlTypes.JSON)
     @Column(name = "metadata", columnDefinition = "jsonb")
     private String metadata = "{}";
 

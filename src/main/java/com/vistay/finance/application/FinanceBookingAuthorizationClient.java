@@ -41,8 +41,24 @@ public class FinanceBookingAuthorizationClient {
         }
         try {
             var response = lookup.get(bookingId);
+            UUID propertyId = null;
+            if (response.getPropertyId() != null && !response.getPropertyId().isBlank()) {
+                try {
+                    propertyId = UUID.fromString(response.getPropertyId());
+                } catch (IllegalArgumentException ignored) {
+                }
+            }
+            UUID customerId = null;
+            if (response.hasCustomerId() && !response.getCustomerId().isBlank()) {
+                try {
+                    customerId = UUID.fromString(response.getCustomerId());
+                } catch (IllegalArgumentException ignored) {
+                }
+            }
             return new BookingRecord(
                 UUID.fromString(response.getBookingId()),
+                propertyId,
+                customerId,
                 response.hasAssignedAdminUserId()
                     ? UUID.fromString(response.getAssignedAdminUserId()) : null,
                 response.getActiveAttributedAdminUserIdsList().stream()
@@ -68,9 +84,19 @@ public class FinanceBookingAuthorizationClient {
 
     public record BookingRecord(
         UUID bookingId,
+        UUID propertyId,
+        UUID customerId,
         UUID assignedAdminUserId,
         Set<UUID> activeAttributedAdminUserIds
     ) {
+        public BookingRecord(
+            UUID bookingId,
+            UUID assignedAdminUserId,
+            Set<UUID> activeAttributedAdminUserIds
+        ) {
+            this(bookingId, null, null, assignedAdminUserId, activeAttributedAdminUserIds);
+        }
+
         public boolean isAssignedTo(UUID adminUserId) {
             return adminUserId != null && (adminUserId.equals(assignedAdminUserId)
                 || activeAttributedAdminUserIds.contains(adminUserId));

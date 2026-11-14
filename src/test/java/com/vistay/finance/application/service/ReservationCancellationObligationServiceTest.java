@@ -70,6 +70,10 @@ class ReservationCancellationObligationServiceTest {
     @BeforeEach
     void setUp() {
         mockJdbcOutboxAndProcessedEvents();
+        RuleCatalogue mockRule = mock(RuleCatalogue.class);
+        lenient().when(mockRule.getStatus()).thenReturn(RuleStatus.ACTIVE);
+        lenient().when(mockRule.getRuleVersion()).thenReturn(1);
+        lenient().when(ruleCatalogueRepository.findById(any())).thenReturn(Optional.of(mockRule));
         lenient().when(ruleCatalogueRepository.existsById(any())).thenReturn(true);
         service = new ReservationCancellationObligationService(
             obligationRepository,
@@ -291,7 +295,7 @@ class ReservationCancellationObligationServiceTest {
         mockLedgerVerifiedAdvance(verified);
 
         when(idempotencyRepository.findByIdempotencyKey(anyString())).thenReturn(Optional.empty());
-        when(ruleCatalogueRepository.existsById(any())).thenReturn(false);
+        when(ruleCatalogueRepository.findById(any())).thenReturn(Optional.empty());
 
         ExecuteCancellationCommand cmd = new ExecuteCancellationCommand(
             sourceEventId, bookingId, propertyId, quoteId, VALID_FINGERPRINT,
@@ -546,7 +550,7 @@ class ReservationCancellationObligationServiceTest {
         );
         when(refundRepository.findById(refundId)).thenReturn(Optional.of(refund));
 
-        when(paymentTransactionRepository.findByIdempotencyKey(anyString())).thenReturn(Optional.empty());
+        when(paymentTransactionRepository.findByPaymentProviderAndExternalTransactionId(any(), any())).thenReturn(Optional.empty());
         when(paymentTransactionRepository.save(any(PaymentTransaction.class))).thenAnswer(inv -> inv.getArgument(0));
 
         ReconcileRefundOutcomeCommand reconcileCmd = new ReconcileRefundOutcomeCommand(
@@ -660,5 +664,175 @@ class ReservationCancellationObligationServiceTest {
 
         verify(refund).markFailed();
         verify(obligationRepository).save(argThat(o -> o.getStatus() == CancellationObligationStatus.REFUND_FAILED));
+    }
+
+    @Test
+    @DisplayName("Finding 3.4: Reconcile success missing paymentProvider or externalTransactionId fails closed")
+    void reconcileRefundOutcome_MissingProviderEvidence_FailsClosed() {
+        UUID obligationId = UUID.randomUUID();
+        UUID refundId = UUID.randomUUID();
+
+        ReservationCancellationObligation obligation = new ReservationCancellationObligation(
+            obligationId, bookingId, propertyId, quoteId, VALID_FINGERPRINT,
+            UUID.randomUUID(), 1, new BigDecimal("1000000"), new BigDecimal("700000"), new BigDecimal("300000"),
+            "VND", null, null, sourceEventId, "corr-missing-ev"
+        );
+        obligation.markRefundRequested(refundId);
+
+        when(obligationRepository.findById(obligationId)).thenReturn(Optional.of(obligation));
+
+        // Missing paymentProvider
+        ReconcileRefundOutcomeCommand cmdNoProvider = new ReconcileRefundOutcomeCommand(
+            obligationId, refundId, true, null, null, null, "ext-123", "corr-missing-ev"
+        );
+        assertThatThrownBy(() -> service.reconcileRefundOutcome(cmdNoProvider))
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("PROVIDER_EVIDENCE_REQUIRED");
+
+        // Missing externalTransactionId
+        ReconcileRefundOutcomeCommand cmdNoExtId = new ReconcileRefundOutcomeCommand(
+            obligationId, refundId, true, null, null, "VIETQR", "   ", "corr-missing-ev"
+        );
+        assertThatThrownBy(() -> service.reconcileRefundOutcome(cmdNoExtId))
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("PROVIDER_EVIDENCE_REQUIRED");
+    }
+
+    @Test
+    @DisplayName("Finding 3.4: Reconcile with mismatched amount or currency fails closed")
+    void reconcileRefundOutcome_AmountOrCurrencyMismatch_FailsClosed() {
+        UUID obligationId = UUID.randomUUID();
+        UUID refundId = UUID.randomUUID();
+
+        ReservationCancellationObligation obligation = new ReservationCancellationObligation(
+            obligationId, bookingId, propertyId, quoteId, VALID_FINGERPRINT,
+            UUID.randomUUID(), 1, new BigDecimal("1000000"), new BigDecimal("700000"), new BigDecimal("300000"),
+            "VND", null, null, sourceEventId, "corr-mismatch"
+        );
+        obligation.markRefundRequested(refundId);
+
+        when(obligationRepository.findById(obligationId)).thenReturn(Optional.of(obligation));
+
+        // Mismatched amount
+        ReconcileRefundOutcomeCommand cmdWrongAmount = new ReconcileRefundOutcomeCommand(
+            obligationId, refundId, true, new BigDecimal("999999"), "VND",
+            null, null, "VIETQR", "ext-123", "corr-mismatch"
+        );
+        assertThatThrownBy(() -> service.reconcileRefundOutcome(cmdWrongAmount))
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("REFUND_AMOUNT_MISMATCH");
+
+        // Mismatched currency
+        ReconcileRefundOutcomeCommand cmdWrongCurrency = new ReconcileRefundOutcomeCommand(
+            obligationId, refundId, true, new BigDecimal("700000"), "USD",
+            null, null, "VIETQR", "ext-123", "corr-mismatch"
+        );
+        assertThatThrownBy(() -> service.reconcileRefundOutcome(cmdWrongCurrency))
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("REFUND_CURRENCY_MISMATCH");
+    }
+
+    @Test
+    @DisplayName("Finding 3.4: Duplicate replay with conflicting externalTransactionId fails closed with RECONCILIATION_CONFLICT")
+    void reconcileRefundOutcome_ReconciliationConflict_FailsClosed() {
+        UUID obligationId = UUID.randomUUID();
+        UUID refundId = UUID.randomUUID();
+        UUID txId = UUID.randomUUID();
+
+        ReservationCancellationObligation obligation = new ReservationCancellationObligation(
+            obligationId, bookingId, propertyId, quoteId, VALID_FINGERPRINT,
+            UUID.randomUUID(), 1, new BigDecimal("1000000"), new BigDecimal("700000"), new BigDecimal("300000"),
+            "VND", null, null, sourceEventId, "corr-conflict"
+        );
+        obligation.markRefundRequested(refundId);
+        obligation.markRefunded();
+
+        when(obligationRepository.findById(obligationId)).thenReturn(Optional.of(obligation));
+
+        Refund refund = mock(Refund.class);
+        when(refund.getRefundTransactionId()).thenReturn(txId);
+        when(refundRepository.findById(refundId)).thenReturn(Optional.of(refund));
+
+        PaymentTransaction existingTx = mock(PaymentTransaction.class);
+        when(existingTx.getExternalTransactionId()).thenReturn("ext-original-123");
+        when(paymentTransactionRepository.findById(txId)).thenReturn(Optional.of(existingTx));
+
+        // Replay with different externalTransactionId
+        ReconcileRefundOutcomeCommand cmdConflicting = new ReconcileRefundOutcomeCommand(
+            obligationId, refundId, true, new BigDecimal("700000"), "VND",
+            null, null, "VIETQR", "ext-conflicting-999", "corr-conflict"
+        );
+
+        assertThatThrownBy(() -> service.reconcileRefundOutcome(cmdConflicting))
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("RECONCILIATION_CONFLICT");
+    }
+
+    @Test
+    @DisplayName("Finding 3.4: Operator retry on REFUND_FAILED transitions to REFUND_REQUESTED and emits retry outbox event")
+    void retryFailedRefund_Success_TransitionsToRefundRequestedAndDispatchesOutbox() {
+        mockJdbcOutboxAndProcessedEvents();
+        UUID obligationId = UUID.randomUUID();
+        UUID refundId = UUID.randomUUID();
+
+        ReservationCancellationObligation obligation = new ReservationCancellationObligation(
+            obligationId, bookingId, propertyId, quoteId, VALID_FINGERPRINT,
+            UUID.randomUUID(), 1, new BigDecimal("1000000"), new BigDecimal("700000"), new BigDecimal("300000"),
+            "VND", null, null, sourceEventId, "corr-retry"
+        );
+        obligation.markRefundRequested(refundId);
+        obligation.markRefundFailed("PROVIDER_TIMEOUT", "Gateway timed out");
+
+        when(obligationRepository.findById(obligationId)).thenReturn(Optional.of(obligation));
+        when(obligationRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
+
+        Refund refund = mock(Refund.class);
+        when(refundRepository.findById(refundId)).thenReturn(Optional.of(refund));
+        when(refundRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
+
+        CancellationObligationResponse response = service.retryFailedRefund(obligationId, "corr-retry-op", actor);
+
+        assertThat(response.status()).isEqualTo(CancellationObligationStatus.REFUND_REQUESTED.name());
+        verify(refund).retry();
+        verify(refundRepository).save(refund);
+        verify(obligationRepository).save(argThat(o -> o.getStatus() == CancellationObligationStatus.REFUND_REQUESTED));
+    }
+
+    @Test
+    @DisplayName("Finding 3.4: Operator retry on non-failed obligation fails closed with CANNOT_RETRY_REFUND")
+    void retryFailedRefund_NotFailed_FailsClosed() {
+        UUID obligationId = UUID.randomUUID();
+
+        ReservationCancellationObligation obligation = new ReservationCancellationObligation(
+            obligationId, bookingId, propertyId, quoteId, VALID_FINGERPRINT,
+            UUID.randomUUID(), 1, new BigDecimal("1000000"), new BigDecimal("700000"), new BigDecimal("300000"),
+            "VND", null, null, sourceEventId, "corr-retry"
+        );
+        // Status is PENDING
+        when(obligationRepository.findById(obligationId)).thenReturn(Optional.of(obligation));
+
+        assertThatThrownBy(() -> service.retryFailedRefund(obligationId, "corr-retry", actor))
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("CANNOT_RETRY_REFUND");
+    }
+
+    @Test
+    @DisplayName("Finding 3.3: Cancellation with non-existent or inactive policy rule version fails closed")
+    void executeCancellation_PolicyRuleVersionMismatch_FailsClosed() {
+        BigDecimal verified = new BigDecimal("1000000.0000");
+        mockLedgerVerifiedAdvance(verified);
+
+        when(idempotencyRepository.findByIdempotencyKey(anyString())).thenReturn(Optional.empty());
+        when(ruleCatalogueRepository.findById(any())).thenReturn(Optional.empty());
+
+        ExecuteCancellationCommand cmd = new ExecuteCancellationCommand(
+            sourceEventId, bookingId, propertyId, quoteId, VALID_FINGERPRINT,
+            UUID.randomUUID(), 99, verified, new BigDecimal("700000"), new BigDecimal("300000"), "VND",
+            null, null, "corr-rule-fail", "idemp-rule-fail"
+        );
+
+        assertThatThrownBy(() -> service.processCancellationExecution(cmd, actor))
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("POLICY_RULE_NOT_FOUND");
     }
 }

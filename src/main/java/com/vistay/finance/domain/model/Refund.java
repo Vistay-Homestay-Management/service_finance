@@ -119,6 +119,14 @@ public class Refund {
         this.completedAt = Instant.now();
     }
 
+    public void retry() {
+        if (this.status != RefundStatus.FAILED) {
+            throw new IllegalStateException("Cannot retry refund from status: " + this.status);
+        }
+        this.status = RefundStatus.REQUESTED;
+        this.completedAt = null;
+    }
+
     public UUID getId() {
         return id;
     }

@@ -8,6 +8,7 @@ import com.vistay.finance.domain.model.*;
 import com.vistay.finance.domain.repository.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -35,6 +36,7 @@ public class ReservationCancellationObligationService {
     private final JdbcClient jdbc;
     private final ObjectMapper objectMapper;
 
+    @Autowired
     public ReservationCancellationObligationService(
         ReservationCancellationObligationRepository obligationRepository,
         FinanceCommandIdempotencyRepository idempotencyRepository,
@@ -45,30 +47,14 @@ public class ReservationCancellationObligationService {
         JdbcClient jdbc,
         ObjectMapper objectMapper
     ) {
-        this.obligationRepository = obligationRepository;
-        this.idempotencyRepository = idempotencyRepository;
-        this.paymentTransactionRepository = paymentTransactionRepository;
-        this.refundRepository = refundRepository;
-        this.ruleCatalogueRepository = ruleCatalogueRepository;
-        this.authorization = authorization;
-        this.jdbc = jdbc;
-        this.objectMapper = objectMapper;
-    }
-
-    /**
-     * Backward-compatible constructor for existing tests and components.
-     */
-    public ReservationCancellationObligationService(
-        ReservationCancellationObligationRepository obligationRepository,
-        FinanceCommandIdempotencyRepository idempotencyRepository,
-        PaymentTransactionRepository paymentTransactionRepository,
-        RefundRepository refundRepository,
-        FinanceOperationalAuthorization authorization,
-        JdbcClient jdbc,
-        ObjectMapper objectMapper
-    ) {
-        this(obligationRepository, idempotencyRepository, paymentTransactionRepository,
-             refundRepository, null, authorization, jdbc, objectMapper);
+        this.obligationRepository = Objects.requireNonNull(obligationRepository, "obligationRepository is mandatory");
+        this.idempotencyRepository = Objects.requireNonNull(idempotencyRepository, "idempotencyRepository is mandatory");
+        this.paymentTransactionRepository = Objects.requireNonNull(paymentTransactionRepository, "paymentTransactionRepository is mandatory");
+        this.refundRepository = Objects.requireNonNull(refundRepository, "refundRepository is mandatory");
+        this.ruleCatalogueRepository = Objects.requireNonNull(ruleCatalogueRepository, "ruleCatalogueRepository is mandatory");
+        this.authorization = Objects.requireNonNull(authorization, "authorization is mandatory");
+        this.jdbc = Objects.requireNonNull(jdbc, "jdbc is mandatory");
+        this.objectMapper = Objects.requireNonNull(objectMapper, "objectMapper is mandatory");
     }
 
     /**
@@ -151,16 +137,27 @@ public class ReservationCancellationObligationService {
      */
     @Transactional
     public CancellationObligationResponse processCancellationExecution(ExecuteCancellationCommand cmd, Actor actor) {
+        return processCancellationExecution(cmd, null, actor);
+    }
+
+    @Transactional
+    public CancellationObligationResponse processCancellationExecution(ExecuteCancellationCommand cmd, UUID authoritativePropertyId, Actor actor) {
         if (cmd == null) {
             throw new IllegalArgumentException("Command cannot be null");
         }
 
-        // 1. Authorization checks via Scope alternatives
-        if (actor != null) {
-            authorization.requireReservationAccess(actor, cmd.bookingId(), cmd.propertyId(), null);
+        // 1. Authoritative property validation & binding (Finding 3.2)
+        UUID resolvedPropertyId = authoritativePropertyId != null ? authoritativePropertyId : cmd.propertyId();
+        if (authoritativePropertyId != null && cmd.propertyId() != null && !cmd.propertyId().equals(authoritativePropertyId)) {
+            throw new IllegalArgumentException("BOOKING_PROPERTY_MISMATCH: Command property ID does not match authoritative booking property");
         }
 
-        // 2. Trust boundary & format validation (Finding B)
+        // Authorization checks via Scope alternatives
+        if (actor != null) {
+            authorization.requireReservationAccess(actor, cmd.bookingId(), resolvedPropertyId, null);
+        }
+
+        // 2. Trust boundary & format validation (Finding 3.3)
         if (cmd.cancellationQuoteFingerprint() == null || !cmd.cancellationQuoteFingerprint().matches("^[a-fA-F0-9]{64}$")) {
             throw new IllegalArgumentException("INVALID_QUOTE_FINGERPRINT: Cancellation quote fingerprint must be a 64-character SHA-256 hex string");
         }
@@ -284,12 +281,26 @@ public class ReservationCancellationObligationService {
             }
         }
 
-        // 8. Rule catalogue verification if policy rule specified
-        if (cmd.policyRuleId() != null && ruleCatalogueRepository != null) {
-            if (!ruleCatalogueRepository.existsById(cmd.policyRuleId())) {
-                idempotency.markFailed("POLICY_RULE_NOT_FOUND");
+        // 8. Rule catalogue verification & policy version match (Finding 3.3)
+        if (cmd.policyRuleId() != null) {
+            RuleCatalogue rule = ruleCatalogueRepository.findById(cmd.policyRuleId())
+                .orElseThrow(() -> {
+                    idempotency.markFailed("POLICY_RULE_NOT_FOUND");
+                    idempotencyRepository.save(idempotency);
+                    return new IllegalStateException("POLICY_RULE_NOT_FOUND: Policy rule " + cmd.policyRuleId() + " does not exist in rule catalogue");
+                });
+
+            if (cmd.policyRuleVersion() != null && !cmd.policyRuleVersion().equals(rule.getRuleVersion())) {
+                idempotency.markFailed("POLICY_RULE_VERSION_MISMATCH");
                 idempotencyRepository.save(idempotency);
-                throw new IllegalStateException("POLICY_RULE_NOT_FOUND: Policy rule " + cmd.policyRuleId() + " does not exist in rule catalogue");
+                throw new IllegalStateException("POLICY_RULE_VERSION_MISMATCH: Command rule version " + cmd.policyRuleVersion()
+                    + " does not match catalogue rule version " + rule.getRuleVersion());
+            }
+
+            if (rule.getStatus() != RuleStatus.ACTIVE) {
+                idempotency.markFailed("POLICY_RULE_INACTIVE");
+                idempotencyRepository.save(idempotency);
+                throw new IllegalStateException("POLICY_RULE_INACTIVE: Policy rule " + cmd.policyRuleId() + " is not ACTIVE");
             }
         }
 
@@ -300,11 +311,11 @@ public class ReservationCancellationObligationService {
             throw new IllegalStateException("OBLIGATION_ALREADY_EXISTS: Cancellation obligation already exists for booking: " + cmd.bookingId());
         }
 
-        // 8. Create Obligation
+        // 9. Create Obligation with resolved authoritative propertyId
         ReservationCancellationObligation obligation = new ReservationCancellationObligation(
             UUID.randomUUID(),
             cmd.bookingId(),
-            cmd.propertyId(),
+            resolvedPropertyId,
             cmd.cancellationQuoteId(),
             cmd.cancellationQuoteFingerprint(),
             cmd.policyRuleId(),
@@ -319,7 +330,7 @@ public class ReservationCancellationObligationService {
             cmd.correlationId()
         );
 
-        // 9. If refundable > 0, create refund request in refunds ledger
+        // 10. If refundable > 0, create refund request in refunds ledger
         if (cmd.refundableAmount().compareTo(BigDecimal.ZERO) > 0) {
             UUID originalTxId = findOriginalTransactionId(cmd.bookingId());
             String refundCode = "RFD-CANCEL-" + UUID.randomUUID().toString().substring(0, 8).toUpperCase();
@@ -342,7 +353,7 @@ public class ReservationCancellationObligationService {
 
         ReservationCancellationObligation saved = obligationRepository.save(obligation);
 
-        // 10. Emit transactional outbox event
+        // 11. Emit transactional outbox event
         String eventPayload = String.format(
             "{\"obligationId\":\"%s\",\"bookingId\":\"%s\",\"cancellationQuoteId\":\"%s\",\"refundableAmount\":\"%s\",\"forfeitedAmount\":\"%s\",\"status\":\"%s\",\"correlationId\":\"%s\"}",
             saved.getId(), saved.getBookingId(), saved.getCancellationQuoteId(),
@@ -366,7 +377,7 @@ public class ReservationCancellationObligationService {
             .param("correlationId", saved.getCorrelationId())
             .update();
 
-        // 11. Mark idempotency succeeded
+        // 12. Mark idempotency succeeded
         idempotency.markSucceeded("ReservationCancellationObligation", saved.getId(), eventPayload);
         idempotencyRepository.save(idempotency);
 
@@ -376,26 +387,50 @@ public class ReservationCancellationObligationService {
 
     /**
      * Reconciles payment provider refund outcome without reactivating the booking.
-     * Enforces real PaymentTransaction FK and durable callback replay / repair (Findings A, E).
+     * Enforces real PaymentTransaction FK, mandatory provider evidence, and durable callback replay / repair (Findings 3.4).
      */
     @Transactional
     public CancellationObligationResponse reconcileRefundOutcome(ReconcileRefundOutcomeCommand cmd) {
         if (cmd == null || cmd.obligationId() == null) {
             throw new IllegalArgumentException("Reconcile command and obligation ID cannot be null");
         }
+        if (cmd.refundId() == null) {
+            throw new IllegalArgumentException("REFUND_ID_REQUIRED: Callback requires refundId");
+        }
 
         ReservationCancellationObligation obligation = obligationRepository.findById(cmd.obligationId())
             .orElseThrow(() -> new NoSuchElementException("Cancellation obligation not found: " + cmd.obligationId()));
 
-        // Finding E: Verify refund identity match if refundId provided in callback
-        if (cmd.refundId() != null && obligation.getRefundId() != null && !cmd.refundId().equals(obligation.getRefundId())) {
+        // Finding 3.4: Verify refund identity match
+        if (!cmd.refundId().equals(obligation.getRefundId())) {
             throw new IllegalArgumentException("REFUND_IDENTITY_MISMATCH: Callback refund ID " + cmd.refundId()
                 + " does not match obligation refund ID " + obligation.getRefundId());
         }
 
-        // Finding E: Durable callback replay / contradictory callback ordering
+        // Finding 3.4: Verify amount and currency if provided
+        if (cmd.amount() != null && cmd.amount().compareTo(obligation.getRefundableAmount()) != 0) {
+            throw new IllegalArgumentException("REFUND_AMOUNT_MISMATCH: Callback amount " + cmd.amount()
+                + " does not match obligation refundable amount " + obligation.getRefundableAmount());
+        }
+        if (cmd.currency() != null && !cmd.currency().equalsIgnoreCase(obligation.getCurrency())) {
+            throw new IllegalArgumentException("REFUND_CURRENCY_MISMATCH: Callback currency " + cmd.currency()
+                + " does not match obligation currency " + obligation.getCurrency());
+        }
+
+        // Finding 3.4: Durable callback replay / contradictory callback ordering
         if (obligation.getStatus() == CancellationObligationStatus.REFUNDED) {
             if (cmd.success()) {
+                // If paymentProvider and externalTransactionId are present, check reconciliation consistency
+                if (cmd.externalTransactionId() != null && obligation.getRefundId() != null) {
+                    Refund ref = refundRepository.findById(obligation.getRefundId()).orElse(null);
+                    if (ref != null && ref.getRefundTransactionId() != null) {
+                        PaymentTransaction existingTx = paymentTransactionRepository.findById(ref.getRefundTransactionId()).orElse(null);
+                        if (existingTx != null && existingTx.getExternalTransactionId() != null
+                            && !existingTx.getExternalTransactionId().equals(cmd.externalTransactionId())) {
+                            throw new IllegalStateException("RECONCILIATION_CONFLICT: Refund already completed with differing provider external transaction ID");
+                        }
+                    }
+                }
                 log.info("Idempotent replay of successful refund reconciliation for obligation {}", obligation.getId());
                 return CancellationObligationResponse.from(obligation);
             } else {
@@ -410,42 +445,50 @@ public class ReservationCancellationObligationService {
         }
 
         if (cmd.success()) {
-            // Finding A: Create real, immutable REFUND PaymentTransaction to satisfy DB FK refunds.refund_transaction_id -> payment_transactions.id
+            // Finding 3.4: Enforce mandatory provider evidence; reject forged random or default credentials
+            if (cmd.paymentProvider() == null || cmd.paymentProvider().trim().isBlank()) {
+                throw new IllegalArgumentException("PROVIDER_EVIDENCE_REQUIRED: Successful refund outcome requires non-blank paymentProvider");
+            }
+            if (cmd.externalTransactionId() == null || cmd.externalTransactionId().trim().isBlank()) {
+                throw new IllegalArgumentException("PROVIDER_EVIDENCE_REQUIRED: Successful refund outcome requires non-blank externalTransactionId");
+            }
+
+            // Create real, immutable REFUND PaymentTransaction to satisfy DB FK refunds.refund_transaction_id -> payment_transactions.id
             if (obligation.getRefundId() != null) {
-                Refund refund = refundRepository.findById(obligation.getRefundId()).orElse(null);
-                if (refund != null) {
-                    if (refund.getRefundTransactionId() == null) {
-                        String txCode = "TX-RFD-" + UUID.randomUUID().toString().substring(0, 8).toUpperCase();
-                        String txIdempKey = "tx-refund:" + refund.getId();
+                Refund refund = refundRepository.findById(obligation.getRefundId())
+                    .orElseThrow(() -> new IllegalStateException("Refund record not found for ID: " + obligation.getRefundId()));
 
-                        PaymentTransaction refundTx = paymentTransactionRepository.findByIdempotencyKey(txIdempKey)
-                            .orElseGet(() -> {
-                                PaymentTransaction tx = new PaymentTransaction(
-                                    UUID.randomUUID(),
-                                    txCode,
-                                    null,
-                                    null,
-                                    refund.getOriginalTransactionId(),
-                                    refund.getBookingId(),
-                                    TransactionType.REFUND,
-                                    refund.getAmount(),
-                                    refund.getCurrency(),
-                                    PaymentMethod.BANK_TRANSFER,
-                                    null,
-                                    cmd.paymentProvider() != null && !cmd.paymentProvider().isBlank() ? cmd.paymentProvider() : "VIETQR",
-                                    cmd.externalTransactionId() != null && !cmd.externalTransactionId().isBlank() ? cmd.externalTransactionId() : ("ext-" + UUID.randomUUID()),
-                                    TransactionStatus.SUCCEEDED,
-                                    txIdempKey,
-                                    "Cancellation refund completed for booking " + refund.getBookingId(),
-                                    refund.getRequestedByAdminUserId() != null ? refund.getRequestedByAdminUserId() : UUID.randomUUID()
-                                );
-                                tx.markSucceeded();
-                                return paymentTransactionRepository.save(tx);
-                            });
+                if (refund.getRefundTransactionId() == null) {
+                    String txCode = "TX-RFD-" + UUID.randomUUID().toString().substring(0, 8).toUpperCase();
+                    String txIdempKey = "tx-refund:" + refund.getId() + ":" + cmd.externalTransactionId();
 
-                        refund.markCompleted(refundTx.getId());
-                        refundRepository.save(refund);
-                    }
+                    PaymentTransaction refundTx = paymentTransactionRepository.findByPaymentProviderAndExternalTransactionId(cmd.paymentProvider(), cmd.externalTransactionId())
+                        .orElseGet(() -> {
+                            PaymentTransaction tx = new PaymentTransaction(
+                                UUID.randomUUID(),
+                                txCode,
+                                null,
+                                null,
+                                refund.getOriginalTransactionId(),
+                                refund.getBookingId(),
+                                TransactionType.REFUND,
+                                refund.getAmount(),
+                                refund.getCurrency(),
+                                PaymentMethod.BANK_TRANSFER,
+                                null,
+                                cmd.paymentProvider(),
+                                cmd.externalTransactionId(),
+                                TransactionStatus.SUCCEEDED,
+                                txIdempKey,
+                                "Cancellation refund completed for booking " + refund.getBookingId(),
+                                refund.getRequestedByAdminUserId() != null ? refund.getRequestedByAdminUserId() : UUID.randomUUID()
+                            );
+                            tx.markSucceeded();
+                            return paymentTransactionRepository.save(tx);
+                        });
+
+                    refund.markCompleted(refundTx.getId());
+                    refundRepository.save(refund);
                 }
             }
             obligation.markRefunded();
@@ -493,6 +536,59 @@ public class ReservationCancellationObligationService {
             .update();
 
         return CancellationObligationResponse.from(updated);
+    }
+
+    /**
+     * Finding 3.4: Operator repair action to retry failed refund without reactivating booking.
+     */
+    @Transactional
+    public CancellationObligationResponse retryFailedRefund(UUID obligationId, String correlationId, Actor actor) {
+        if (obligationId == null) {
+            throw new IllegalArgumentException("Obligation ID cannot be null");
+        }
+
+        ReservationCancellationObligation obligation = obligationRepository.findById(obligationId)
+            .orElseThrow(() -> new NoSuchElementException("Cancellation obligation not found: " + obligationId));
+
+        if (obligation.getStatus() != CancellationObligationStatus.REFUND_FAILED) {
+            throw new IllegalStateException("CANNOT_RETRY_REFUND: Obligation status must be REFUND_FAILED to retry, current status: " + obligation.getStatus());
+        }
+
+        if (obligation.getRefundId() != null) {
+            Refund refund = refundRepository.findById(obligation.getRefundId())
+                .orElseThrow(() -> new NoSuchElementException("Associated refund record not found: " + obligation.getRefundId()));
+            refund.retry();
+            refundRepository.save(refund);
+        }
+
+        obligation.retryRefund();
+        ReservationCancellationObligation saved = obligationRepository.save(obligation);
+
+        // Emit transactional outbox event for retry dispatch
+        String payload = String.format(
+            "{\"obligationId\":\"%s\",\"bookingId\":\"%s\",\"refundId\":\"%s\",\"status\":\"REFUND_REQUESTED\",\"correlationId\":\"%s\"}",
+            saved.getId(), saved.getBookingId(), saved.getRefundId(), correlationId != null ? correlationId : ""
+        );
+
+        jdbc.sql("""
+                INSERT INTO app.outbox_events(
+                    aggregate_type, aggregate_id, aggregate_version,
+                    event_type, event_version, payload,
+                    correlation_id
+                ) VALUES (
+                    'CancellationObligation', :aggregateId, :version,
+                    'vistay.finance.cancellation-refund-retry-requested.v1', 1, :payload::jsonb,
+                    :correlationId
+                )
+                """)
+            .param("aggregateId", saved.getId())
+            .param("version", saved.getVersion())
+            .param("payload", payload)
+            .param("correlationId", correlationId != null ? correlationId : "")
+            .update();
+
+        log.info("Successfully retried failed refund for obligation {} (booking {})", saved.getId(), saved.getBookingId());
+        return CancellationObligationResponse.from(saved);
     }
 
     @Transactional(readOnly = true)

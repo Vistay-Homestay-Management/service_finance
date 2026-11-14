@@ -46,16 +46,31 @@ public class ReservationCancellationObligationController {
     ) {
         // Enforce action and scope specifically for CANCELLATION_ASSESS
         var cancelActor = authorization.require(jwt, FinanceOperationalAuthorization.CANCELLATION_ASSESS);
-        authorization.requireReservationAccess(cancelActor, command.bookingId(), command.propertyId(), null);
+        var authoritativeBooking = authorization.requireReservationAccess(cancelActor, command.bookingId(), command.propertyId(), null);
+        UUID resolvedPropertyId = authoritativeBooking != null && authoritativeBooking.propertyId() != null
+            ? authoritativeBooking.propertyId()
+            : command.propertyId();
 
         // Finding C: Enforce action and scope specifically for REFUND_CREATE (pairing grant + actor scope)
         if (command.refundableAmount() != null && command.refundableAmount().compareTo(BigDecimal.ZERO) > 0) {
             var refundActor = authorization.require(jwt, FinanceOperationalAuthorization.REFUND_CREATE);
-            authorization.requireReservationAccess(refundActor, command.bookingId(), command.propertyId(), null);
+            authorization.requireReservationAccess(refundActor, command.bookingId(), resolvedPropertyId, null);
         }
 
         CancellationObligationResponse response = obligationService.processCancellationExecution(command, cancelActor);
         return ResponseEntity.status(HttpStatus.CREATED).body(response);
+    }
+
+    @PostMapping("/obligations/{id}/retry-refund")
+    public ResponseEntity<CancellationObligationResponse> retryFailedRefund(
+        @AuthenticationPrincipal Jwt jwt,
+        @PathVariable UUID id,
+        @RequestParam String correlationId
+    ) {
+        var actor = authorization.require(jwt, FinanceOperationalAuthorization.CANCELLATION_ASSESS);
+        var existing = obligationService.getObligationById(id);
+        authorization.requireReservationAccess(actor, existing.bookingId(), existing.propertyId(), null);
+        return ResponseEntity.ok(obligationService.retryFailedRefund(id, correlationId, actor));
     }
 
     @PostMapping("/obligations/{id}/reconcile-refund")

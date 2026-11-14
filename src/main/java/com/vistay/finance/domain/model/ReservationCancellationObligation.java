@@ -29,6 +29,7 @@ public class ReservationCancellationObligation {
     @Column(name = "cancellation_quote_id", nullable = false, unique = true)
     private UUID cancellationQuoteId;
 
+    @org.hibernate.annotations.JdbcTypeCode(org.hibernate.type.SqlTypes.CHAR)
     @Column(name = "cancellation_quote_fingerprint", length = 64, nullable = false)
     private String cancellationQuoteFingerprint;
 
@@ -47,6 +48,7 @@ public class ReservationCancellationObligation {
     @Column(name = "forfeited_amount", precision = 19, scale = 4, nullable = false)
     private BigDecimal forfeitedAmount;
 
+    @org.hibernate.annotations.JdbcTypeCode(org.hibernate.type.SqlTypes.CHAR)
     @Column(name = "currency", length = 3, nullable = false)
     private String currency;
 

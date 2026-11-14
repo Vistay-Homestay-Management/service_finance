@@ -103,21 +103,6 @@ public class FinanceCommandIdempotency {
         this.createdAt = Instant.now();
     }
 
-    public FinanceCommandIdempotency(String idempotencyKey,
-                                     String commandType,
-                                     String actorType,
-                                     UUID actorId,
-                                     String requestHash,
-                                     String status,
-                                     String resourceType,
-                                     UUID resourceId,
-                                     String responsePayload,
-                                     String errorCode,
-                                     Instant expiresAt) {
-        this(idempotencyKey, commandType, actorType, actorId, requestHash,
-             CommandIdempotencyStatus.valueOf(status), resourceType, resourceId, responsePayload, errorCode, expiresAt);
-    }
-
     public void markSucceeded(String responsePayload, UUID resourceId) {
         this.status = CommandIdempotencyStatus.SUCCEEDED;
         this.responsePayload = responsePayload;
@@ -149,7 +134,6 @@ public class FinanceCommandIdempotency {
     public UUID getActorId() { return actorId; }
     public String getRequestHash() { return requestHash; }
     public CommandIdempotencyStatus getStatus() { return status; }
-    public String getStatusAsString() { return status != null ? status.name() : null; }
     public String getResourceType() { return resourceType; }
     public UUID getResourceId() { return resourceId; }
     public String getResponsePayload() { return responsePayload; }

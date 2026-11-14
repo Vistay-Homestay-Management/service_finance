@@ -111,7 +111,7 @@ class ReservationCancellationObligationControllerTest {
         when(authorization.require(jwt, FinanceOperationalAuthorization.REFUND_CREATE)).thenReturn(refundActor);
 
         // Cancel actor passes, but refund actor is denied scope for this property partition
-        doNothing().when(authorization).requireReservationAccess(cancelActor, bookingId, propertyId, null);
+        when(authorization.requireReservationAccess(cancelActor, bookingId, propertyId, null)).thenReturn(null);
         doThrow(new ResponseStatusException(HttpStatus.FORBIDDEN, "Record is outside the authorized scope for finance:refund:create"))
             .when(authorization).requireReservationAccess(refundActor, bookingId, propertyId, null);
 
@@ -155,5 +155,53 @@ class ReservationCancellationObligationControllerTest {
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
         verify(authorization).requireAll(jwt, FinanceOperationalAuthorization.CANCELLATION_ASSESS);
+    }
+
+    @Test
+    @DisplayName("Finding 3.2: When caller supplies property that contradicts authoritative booking, controller rejects with FORBIDDEN")
+    void execute_WhenSuppliedPropertyContradictsAuthoritativeBooking_ThrowsForbidden() {
+        ExecuteCancellationCommand cmd = new ExecuteCancellationCommand(
+            UUID.randomUUID(), bookingId, propertyId, UUID.randomUUID(), "fingerprint-ctrl",
+            UUID.randomUUID(), 1, new BigDecimal("1000000"), new BigDecimal("700000"),
+            new BigDecimal("300000"), "VND", null, null, "corr-ctrl", "idemp-ctrl"
+        );
+
+        doThrow(new ResponseStatusException(HttpStatus.FORBIDDEN, "Supplied property ID does not match authoritative reservation property"))
+            .when(authorization).requireReservationAccess(actor, bookingId, propertyId, null);
+
+        assertThatThrownBy(() -> controller.executeCancellation(jwt, cmd))
+            .isInstanceOf(ResponseStatusException.class)
+            .hasMessageContaining("Supplied property ID does not match authoritative reservation property");
+
+        verify(service, never()).processCancellationExecution(any(), any());
+    }
+
+    @Test
+    @DisplayName("Finding 3.4: retryFailedRefund endpoint enforces CANCELLATION_ASSESS, reservation access, and invokes service")
+    void retryFailedRefund_EnforcesCancellationAssessAndReservationAccess() {
+        CancellationObligationResponse existing = new CancellationObligationResponse(
+            obligationId, bookingId, propertyId, UUID.randomUUID(), "fp",
+            null, null, new BigDecimal("1000000"), new BigDecimal("700000"),
+            new BigDecimal("300000"), "VND", null, null, UUID.randomUUID(), "REFUND_FAILED", null, null,
+            UUID.randomUUID(), "corr", 0L, Instant.now(), Instant.now()
+        );
+        when(service.getObligationById(obligationId)).thenReturn(existing);
+
+        CancellationObligationResponse retried = new CancellationObligationResponse(
+            obligationId, bookingId, propertyId, existing.cancellationQuoteId(), existing.cancellationQuoteFingerprint(),
+            null, null, existing.verifiedCollectedAmount(), existing.refundableAmount(),
+            existing.forfeitedAmount(), "VND", null, null, UUID.randomUUID(), "REFUND_REQUESTED", null, null,
+            existing.sourceEventId(), "corr-retry", 1L, Instant.now(), Instant.now()
+        );
+        when(service.retryFailedRefund(obligationId, "corr-retry", actor)).thenReturn(retried);
+
+        ResponseEntity<CancellationObligationResponse> response =
+            controller.retryFailedRefund(jwt, obligationId, "corr-retry");
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(response.getBody()).isEqualTo(retried);
+        verify(authorization).require(jwt, FinanceOperationalAuthorization.CANCELLATION_ASSESS);
+        verify(authorization).requireReservationAccess(actor, bookingId, propertyId, null);
+        verify(service).retryFailedRefund(obligationId, "corr-retry", actor);
     }
 }
