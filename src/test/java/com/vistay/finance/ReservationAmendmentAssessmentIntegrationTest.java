@@ -328,16 +328,18 @@ class ReservationAmendmentAssessmentIntegrationTest {
     }
 
     @Test
-    @DisplayName("Executed event: fully collected amendment creates SETTLED receivable with allocation")
+    @DisplayName("Executed event: allocator splits multi-payment verified capacity into settled receivable and allocations")
     void executedEvent_whenFullyCollected_createsSettledReceivableWithAllocation() throws Exception {
         UUID bookingId = UUID.randomUUID();
         UUID customerId = UUID.randomUUID();
         UUID paymentRequestId = UUID.randomUUID();
-        UUID txId = UUID.randomUUID();
-        UUID receivableId = UUID.randomUUID();
+        UUID tx1Id = UUID.randomUUID();
+        UUID tx2Id = UUID.randomUUID();
+        UUID eventId = UUID.randomUUID();
+        String proposalId = "prop-alloc-01";
 
         try (Connection conn = createConnection()) {
-            // Setup payment request and succeeded transaction
+            // Setup payment request
             try (PreparedStatement ps = conn.prepareStatement("""
                 INSERT INTO app.payment_requests(id, request_code, booking_id, payer_type, payer_id, amount, currency, purpose, idempotency_key, status)
                 VALUES (?, ?, ?, 'CUSTOMER', ?, 5000000, 'VND', 'Amendment payment', ?, 'PAID')
@@ -350,57 +352,80 @@ class ReservationAmendmentAssessmentIntegrationTest {
                 ps.executeUpdate();
             }
 
+            // Transaction 1: 1,500,000 VND
             try (PreparedStatement ps = conn.prepareStatement("""
-                INSERT INTO app.payment_transactions(id, transaction_code, payment_request_id, booking_id, transaction_type, amount, currency, payment_method, payment_provider, status, idempotency_key, description)
-                VALUES (?, ?, ?, ?, 'PAYMENT', 5000000, 'VND', 'BANK_TRANSFER', 'VIETQR', 'SUCCEEDED', ?, 'Amendment payment')
+                INSERT INTO app.payment_transactions(id, transaction_code, payment_request_id, booking_id, transaction_type, amount, currency, payment_method, payment_provider, status, idempotency_key, description, occurred_at)
+                VALUES (?, ?, ?, ?, 'PAYMENT', 1500000, 'VND', 'BANK_TRANSFER', 'VIETQR', 'SUCCEEDED', ?, 'Amendment payment 1', now() - interval '10 minutes')
                 """)) {
-                ps.setObject(1, txId);
+                ps.setObject(1, tx1Id);
                 ps.setString(2, "TX-" + UUID.randomUUID().toString().substring(0, 8).toUpperCase());
                 ps.setObject(3, paymentRequestId);
                 ps.setObject(4, bookingId);
-                ps.setString(5, "idem-tx-" + UUID.randomUUID());
+                ps.setString(5, "idem-tx-1-" + UUID.randomUUID());
                 ps.executeUpdate();
             }
 
-            // Insert SETTLED compensating receivable (already fully paid)
+            // Transaction 2: 500,000 VND
             try (PreparedStatement ps = conn.prepareStatement("""
-                INSERT INTO app.receivables(
-                    id, receivable_code, source_key, booking_id, debtor_type, debtor_id,
-                    category, description, due_date, amount_due, amount_paid, amount_waived,
-                    currency, status, closed_at
-                ) VALUES (
-                    ?, 'REC-SETTLED-001', ?, ?, 'CUSTOMER', ?,
-                    'RESERVATION_AMENDMENT', 'Settled compensating receivable', CURRENT_DATE + 1, 2000000, 2000000, 0,
-                    'VND', 'SETTLED', now()
-                )
+                INSERT INTO app.payment_transactions(id, transaction_code, payment_request_id, booking_id, transaction_type, amount, currency, payment_method, payment_provider, status, idempotency_key, description, occurred_at)
+                VALUES (?, ?, ?, ?, 'PAYMENT', 5000000, 'VND', 'BANK_TRANSFER', 'VIETQR', 'SUCCEEDED', ?, 'Amendment payment 2', now() - interval '5 minutes')
                 """)) {
-                ps.setObject(1, receivableId);
-                ps.setString(2, "amendment-settled-" + UUID.randomUUID());
-                ps.setObject(3, bookingId);
-                ps.setObject(4, customerId);
-                int rows = ps.executeUpdate();
-                assertThat(rows).isEqualTo(1);
+                ps.setObject(1, tx2Id);
+                ps.setString(2, "TX-" + UUID.randomUUID().toString().substring(0, 8).toUpperCase());
+                ps.setObject(3, paymentRequestId);
+                ps.setObject(4, bookingId);
+                ps.setString(5, "idem-tx-2-" + UUID.randomUUID());
+                ps.executeUpdate();
             }
 
-            // Insert allocation linking receivable to transaction
-            try (PreparedStatement ps = conn.prepareStatement("""
-                INSERT INTO app.receivable_allocations(id, receivable_id, payment_transaction_id, amount, allocated_at)
-                VALUES (gen_random_uuid(), ?, ?, 2000000, now())
-                """)) {
-                ps.setObject(1, receivableId);
-                ps.setObject(2, txId);
-                int rows = ps.executeUpdate();
-                assertThat(rows).isEqualTo(1);
-            }
+            // Execute real allocator logic from ReservationAmendmentLedgerSupport
+            org.springframework.jdbc.datasource.SingleConnectionDataSource ds =
+                new org.springframework.jdbc.datasource.SingleConnectionDataSource(conn, true);
+            org.springframework.jdbc.core.simple.JdbcClient jdbcClient = org.springframework.jdbc.core.simple.JdbcClient.create(ds);
+            com.vistay.finance.application.service.ReservationAmendmentLedgerSupport ledgerSupport =
+                new com.vistay.finance.application.service.ReservationAmendmentLedgerSupport(jdbcClient, new tools.jackson.databind.ObjectMapper());
+
+            UUID createdRecId = ledgerSupport.insertSettledCompensatingReceivable(
+                bookingId,
+                customerId,
+                proposalId,
+                eventId,
+                java.time.LocalDate.now().plusDays(2),
+                BigDecimal.valueOf(2000000),
+                "VND"
+            );
 
             // Assert receivable is SETTLED and amount_paid == amount_due
             try (PreparedStatement ps = conn.prepareStatement("SELECT status, amount_due, amount_paid FROM app.receivables WHERE id = ?")) {
-                ps.setObject(1, receivableId);
+                ps.setObject(1, createdRecId);
                 try (ResultSet rs = ps.executeQuery()) {
                     assertThat(rs.next()).isTrue();
                     assertThat(rs.getString("status")).isEqualTo("SETTLED");
                     assertThat(rs.getBigDecimal("amount_due")).isEqualByComparingTo(BigDecimal.valueOf(2000000));
                     assertThat(rs.getBigDecimal("amount_paid")).isEqualByComparingTo(BigDecimal.valueOf(2000000));
+                }
+            }
+
+            // Assert receivable_allocations contains split allocations across the two transactions
+            try (PreparedStatement ps = conn.prepareStatement("""
+                SELECT payment_transaction_id, amount
+                FROM app.receivable_allocations
+                WHERE receivable_id = ?
+                ORDER BY amount DESC
+                """)) {
+                ps.setObject(1, createdRecId);
+                try (ResultSet rs = ps.executeQuery()) {
+                    // First allocation from Tx1: exactly 1,500,000
+                    assertThat(rs.next()).isTrue();
+                    assertThat((UUID) rs.getObject("payment_transaction_id")).isEqualTo(tx1Id);
+                    assertThat(rs.getBigDecimal("amount")).isEqualByComparingTo(BigDecimal.valueOf(1500000));
+
+                    // Second allocation from Tx2: exactly 500,000 (total = 2,000,000)
+                    assertThat(rs.next()).isTrue();
+                    assertThat((UUID) rs.getObject("payment_transaction_id")).isEqualTo(tx2Id);
+                    assertThat(rs.getBigDecimal("amount")).isEqualByComparingTo(BigDecimal.valueOf(500000));
+
+                    assertThat(rs.next()).isFalse();
                 }
             }
         }

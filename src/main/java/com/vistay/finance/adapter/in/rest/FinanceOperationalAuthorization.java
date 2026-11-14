@@ -177,39 +177,19 @@ public class FinanceOperationalAuthorization {
         }
 
         var grants = actor.snapshot().grants();
-        boolean hasFinancialScope = hasAnyScope(grants, FINANCE_READ, Scope.ALL, Scope.PARTITION)
-            || hasAnyScope(grants, RESERVATION_AMENDMENT_ASSESS, Scope.ALL, Scope.PARTITION)
-            || hasAnyScope(grants, DEPOSIT_WAIVE, Scope.ALL, Scope.PARTITION);
-        if (hasFinancialScope) {
+        // Fail-closed field group grants: requires explicit field permissions per authorization data matrix
+        // Scope.ALL or action permissions (finance:read) do not substitute for sensitive field group grants
+        if (grants.containsKey("finance:field:financial") || grants.containsKey("finance:field-group:financial")) {
             allowed.add(com.vistay.finance.domain.model.ReservationFieldGroup.FINANCIAL);
         }
-
-        boolean hasTrustDetailScope = hasAnyScope(grants, FINANCE_READ, Scope.ALL)
-            || hasAnyScope(grants, RESERVATION_AMENDMENT_ASSESS, Scope.ALL);
-        if (hasTrustDetailScope) {
+        if (grants.containsKey("finance:field:trust-detail") || grants.containsKey("finance:field-group:trust-detail")) {
             allowed.add(com.vistay.finance.domain.model.ReservationFieldGroup.TRUST_DETAIL);
         }
-
-        boolean hasAuditScope = grants.containsKey(FINANCE_EXPORT)
-            || hasAnyScope(grants, FINANCE_READ, Scope.ALL);
-        if (hasAuditScope) {
+        if (grants.containsKey("finance:field:internal-audit") || grants.containsKey("finance:field-group:internal-audit")) {
             allowed.add(com.vistay.finance.domain.model.ReservationFieldGroup.INTERNAL_AUDIT);
         }
 
         return java.util.Set.copyOf(allowed);
-    }
-
-    private static boolean hasAnyScope(java.util.Map<String, java.util.Set<Scope>> grants, String permission, Scope... scopes) {
-        java.util.Set<Scope> grantedScopes = grants.get(permission);
-        if (grantedScopes == null || grantedScopes.isEmpty()) {
-            return false;
-        }
-        for (Scope s : scopes) {
-            if (grantedScopes.contains(s)) {
-                return true;
-            }
-        }
-        return false;
     }
 
     public UUID bindActor(Actor actor, UUID suppliedAdminUserId) {

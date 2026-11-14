@@ -1,22 +1,7 @@
 SET search_path TO app, extensions, public;
 
-CREATE TABLE IF NOT EXISTS finance_command_idempotency (
-    idempotency_key varchar(160) PRIMARY KEY,
-    command_type varchar(80) NOT NULL,
-    actor_type varchar(24) NOT NULL CHECK (actor_type IN ('ADMIN', 'CUSTOMER', 'SYSTEM')),
-    actor_id uuid NOT NULL,
-    request_hash char(64) NOT NULL,
-    status varchar(24) NOT NULL CHECK (status IN ('PROCESSING', 'SUCCEEDED', 'FAILED')),
-    resource_type varchar(64),
-    resource_id uuid,
-    response_payload jsonb,
-    error_code varchar(80),
-    expires_at timestamptz NOT NULL,
-    created_at timestamptz NOT NULL DEFAULT now(),
-    completed_at timestamptz
-);
-
-CREATE TABLE IF NOT EXISTS reservation_amendment_assessments (
+-- SCRUM-720: Reservation amendment assessments
+CREATE TABLE reservation_amendment_assessments (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     booking_id uuid NOT NULL,
     property_id uuid NOT NULL,
@@ -76,9 +61,9 @@ CREATE TABLE IF NOT EXISTS reservation_amendment_assessments (
     UNIQUE (booking_id, proposal_id, amendment_revision)
 );
 
-CREATE UNIQUE INDEX IF NOT EXISTS ux_amendment_assessment_current
+CREATE UNIQUE INDEX ux_amendment_assessment_current
     ON reservation_amendment_assessments(booking_id, proposal_id)
     WHERE is_current = true;
 
-CREATE INDEX IF NOT EXISTS ix_amendment_assessment_booking
+CREATE INDEX ix_amendment_assessment_booking
     ON reservation_amendment_assessments(booking_id, proposal_id, updated_at DESC);

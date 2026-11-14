@@ -81,6 +81,10 @@ class ReservationAmendmentAssessmentServiceTest {
             objectMapper,
             new SimpleMeterRegistry()
         );
+
+        when(ledgerSupport.findBookingContext(bookingId)).thenReturn(
+            Optional.of(new ReservationAmendmentLedgerSupport.BookingFinancialContext(propertyId, customerId))
+        );
     }
 
     @Test
@@ -596,6 +600,89 @@ class ReservationAmendmentAssessmentServiceTest {
             eq(bookingId), eq(customerId), eq(proposalId), eq(eventId), any(), eq(BigDecimal.valueOf(2000000)), eq("VND")
         );
         verify(ledgerSupport, never()).insertCompensatingReceivable(any(), any(), any(), any(), any(), any(), any());
+    }
+
+    @Test
+    @DisplayName("Authority: resolveOrVerifyAssessScope fails-closed with 404 when booking snapshot is missing")
+    void resolveOrVerifyAssessScope_missingSnapshot_throwsNotFound() {
+        UUID unknownBookingId = UUID.randomUUID();
+        when(ledgerSupport.findBookingContext(unknownBookingId)).thenReturn(Optional.empty());
+        when(assessmentRepository.findByBookingIdOrderByCreatedAtDesc(unknownBookingId)).thenReturn(List.of());
+
+        assertThatThrownBy(() -> service.resolveOrVerifyAssessScope(unknownBookingId, propertyId, customerId))
+            .isInstanceOf(ReservationAmendmentException.class)
+            .satisfies(ex -> {
+                ReservationAmendmentException rae = (ReservationAmendmentException) ex;
+                assertThat(rae.getStatus()).isEqualTo(HttpStatus.NOT_FOUND);
+                assertThat(rae.getErrorCode()).isEqualTo("BOOKING_SNAPSHOT_NOT_FOUND");
+            });
+    }
+
+    @Test
+    @DisplayName("Refund lifecycle: verifyRefundDue successfully transitions REFUND_DUE to VERIFIED with evidence")
+    void verifyRefundDue_whenRefundEvidenceValid_transitionsToVerified() {
+        var snapshot = snapshot(BigDecimal.valueOf(10000000), false);
+        var fp = snapshot.canonicalSha256();
+
+        var refundAssessment = new ReservationAmendmentAssessment(
+            UUID.randomUUID(), bookingId, propertyId, customerId, proposalId, 1L,
+            fp, fp, UUID.randomUUID(), 1,
+            BigDecimal.valueOf(5000000), BigDecimal.valueOf(3000000), BigDecimal.valueOf(5000000),
+            BigDecimal.valueOf(-2000000), "VND", AmendmentRequiredAction.REFUND_DUE,
+            AmendmentAssessmentStatus.REFUND_DUE, actorId, Instant.now().plusSeconds(1800),
+            "key-ref-flow", "corr-ref-flow"
+        );
+
+        when(assessmentRepository.findCurrentForUpdate(bookingId, proposalId))
+            .thenReturn(Optional.of(refundAssessment));
+        when(paymentTransactionRepository.calculateTotalPaidAmountByBookingId(bookingId))
+            .thenReturn(BigDecimal.valueOf(5000000));
+        when(paymentTransactionRepository.calculateTotalRefundedAmountByBookingId(bookingId))
+            .thenReturn(BigDecimal.ZERO);
+        when(assessmentRepository.saveAndFlush(any())).thenAnswer(inv -> inv.getArgument(0));
+
+        var response = service.verifyRefundDue(
+            bookingId, proposalId, null, "idem-ref-flow", "corr", actorId,
+            Set.of(ReservationFieldGroup.RESERVATION_SUMMARY)
+        );
+
+        assertThat(response.status()).isEqualTo(AmendmentAssessmentStatus.VERIFIED);
+        assertThat(response.executable()).isTrue();
+        assertThat(refundAssessment.getStatus()).isEqualTo(AmendmentAssessmentStatus.VERIFIED);
+    }
+
+    @Test
+    @DisplayName("Refund lifecycle: verifyRefundDue throws CONFLICT when refundable capacity is insufficient")
+    void verifyRefundDue_whenInsufficientRefundableFunds_throwsConflict() {
+        var snapshot = snapshot(BigDecimal.valueOf(10000000), false);
+        var fp = snapshot.canonicalSha256();
+
+        var refundAssessment = new ReservationAmendmentAssessment(
+            UUID.randomUUID(), bookingId, propertyId, customerId, proposalId, 1L,
+            fp, fp, UUID.randomUUID(), 1,
+            BigDecimal.valueOf(5000000), BigDecimal.valueOf(3000000), BigDecimal.valueOf(5000000),
+            BigDecimal.valueOf(-2000000), "VND", AmendmentRequiredAction.REFUND_DUE,
+            AmendmentAssessmentStatus.REFUND_DUE, actorId, Instant.now().plusSeconds(1800),
+            "key-ref-insuf", "corr-ref-insuf"
+        );
+
+        when(assessmentRepository.findCurrentForUpdate(bookingId, proposalId))
+            .thenReturn(Optional.of(refundAssessment));
+        // Paid only 1,000,000 but refund due is 2,000,000
+        when(paymentTransactionRepository.calculateTotalPaidAmountByBookingId(bookingId))
+            .thenReturn(BigDecimal.valueOf(1000000));
+        when(paymentTransactionRepository.calculateTotalRefundedAmountByBookingId(bookingId))
+            .thenReturn(BigDecimal.ZERO);
+
+        assertThatThrownBy(() -> service.verifyRefundDue(
+            bookingId, proposalId, null, "idem-ref-insuf", "corr", actorId, Set.of()
+        ))
+            .isInstanceOf(ReservationAmendmentException.class)
+            .satisfies(ex -> {
+                ReservationAmendmentException rae = (ReservationAmendmentException) ex;
+                assertThat(rae.getStatus()).isEqualTo(HttpStatus.CONFLICT);
+                assertThat(rae.getErrorCode()).isEqualTo("INSUFFICIENT_REFUNDABLE_FUNDS");
+            });
     }
 
     private AmendmentProposalSnapshot snapshot(BigDecimal lodgingAmount, boolean manualWaiver) {

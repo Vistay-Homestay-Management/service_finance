@@ -3,6 +3,7 @@ package com.vistay.finance.application.service;
 import java.math.BigDecimal;
 import java.time.Instant;
 import java.time.LocalDate;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
@@ -212,6 +213,8 @@ public class ReservationAmendmentLedgerSupport {
             .optional();
     }
 
+    public record PaymentTxCapacity(UUID id, BigDecimal amount, String currency) {}
+
     @Transactional(propagation = Propagation.MANDATORY)
     public UUID insertSettledCompensatingReceivable(
         UUID bookingId,
@@ -227,6 +230,87 @@ public class ReservationAmendmentLedgerSupport {
         String sourceKey = "amendment:" + bookingId + ":" + proposalId + ":" + executedEventId;
         String description = "Compensating obligation for reservation amendment " + proposalId;
 
+        // Lock eligible payment transactions to compute verified unallocated capacity
+        List<PaymentTxCapacity> eligibleTxs = jdbc.sql("""
+                SELECT id, amount, currency
+                FROM app.payment_transactions
+                WHERE booking_id = :bookingId
+                  AND transaction_type = 'PAYMENT'
+                  AND status = 'SUCCEEDED'
+                  AND currency = :currency
+                ORDER BY occurred_at ASC
+                FOR UPDATE
+                """)
+            .param("bookingId", bookingId)
+            .param("currency", currency)
+            .query((rs, rowNum) -> new PaymentTxCapacity(
+                rs.getObject("id", UUID.class),
+                rs.getBigDecimal("amount"),
+                rs.getString("currency")
+            ))
+            .list();
+
+        record PlannedAllocation(UUID txId, BigDecimal amount) {}
+        List<PlannedAllocation> plannedAllocations = new java.util.ArrayList<>();
+
+        BigDecimal remainingToAllocate = amountDue;
+        BigDecimal totalAllocated = BigDecimal.ZERO;
+
+        for (PaymentTxCapacity tx : eligibleTxs) {
+            if (remainingToAllocate.compareTo(BigDecimal.ZERO) <= 0) {
+                break;
+            }
+
+            BigDecimal alreadyAllocated = jdbc.sql("""
+                    SELECT COALESCE(SUM(amount), 0)
+                    FROM app.receivable_allocations
+                    WHERE payment_transaction_id = :txId
+                      AND reversed_at IS NULL
+                    """)
+                .param("txId", tx.id())
+                .query(BigDecimal.class)
+                .single();
+
+            BigDecimal alreadyRefunded = jdbc.sql("""
+                    SELECT COALESCE(SUM(amount), 0)
+                    FROM app.refunds
+                    WHERE original_transaction_id = :txId
+                      AND status IN ('SUCCEEDED', 'PROCESSING', 'PENDING')
+                    """)
+                .param("txId", tx.id())
+                .query(BigDecimal.class)
+                .single();
+
+            BigDecimal availableCapacity = tx.amount().subtract(alreadyAllocated).subtract(alreadyRefunded);
+            if (availableCapacity.compareTo(BigDecimal.ZERO) <= 0) {
+                continue;
+            }
+
+            BigDecimal allocAmount = remainingToAllocate.min(availableCapacity);
+            plannedAllocations.add(new PlannedAllocation(tx.id(), allocAmount));
+
+            remainingToAllocate = remainingToAllocate.subtract(allocAmount);
+            totalAllocated = totalAllocated.add(allocAmount);
+        }
+
+        final String finalStatus;
+        final BigDecimal finalAmountPaid;
+        final java.sql.Timestamp closedAtTimestamp;
+
+        if (totalAllocated.compareTo(amountDue) >= 0) {
+            finalStatus = "SETTLED";
+            finalAmountPaid = amountDue;
+            closedAtTimestamp = java.sql.Timestamp.from(Instant.now());
+        } else if (totalAllocated.compareTo(BigDecimal.ZERO) > 0) {
+            finalStatus = "PARTIALLY_PAID";
+            finalAmountPaid = totalAllocated;
+            closedAtTimestamp = null;
+        } else {
+            finalStatus = "OPEN";
+            finalAmountPaid = BigDecimal.ZERO;
+            closedAtTimestamp = null;
+        }
+
         jdbc.sql("""
                 INSERT INTO app.receivables(
                     id, receivable_code, source_key, booking_id,
@@ -237,8 +321,8 @@ public class ReservationAmendmentLedgerSupport {
                 VALUES (
                     :id, :code, :sourceKey, :bookingId,
                     'CUSTOMER', :debtorId, 'RESERVATION_AMENDMENT', :description,
-                    :dueDate, :amountDue, :amountDue, 0,
-                    :currency, 'SETTLED', now(), now(), now()
+                    :dueDate, :amountDue, :amountPaid, 0,
+                    :currency, :status, :closedAt, now(), now()
                 )
                 """)
             .param("id", receivableId)
@@ -249,19 +333,13 @@ public class ReservationAmendmentLedgerSupport {
             .param("description", description)
             .param("dueDate", dueDate != null ? dueDate : LocalDate.now().plusDays(1))
             .param("amountDue", amountDue)
+            .param("amountPaid", finalAmountPaid)
             .param("currency", currency)
+            .param("status", finalStatus)
+            .param("closedAt", closedAtTimestamp)
             .update();
 
-        var latestTx = jdbc.sql("""
-                SELECT id FROM app.payment_transactions
-                WHERE booking_id = :bookingId AND transaction_type = 'PAYMENT' AND status = 'SUCCEEDED'
-                ORDER BY occurred_at DESC LIMIT 1
-                """)
-            .param("bookingId", bookingId)
-            .query(UUID.class)
-            .optional();
-
-        latestTx.ifPresent(txId -> {
+        for (PlannedAllocation alloc : plannedAllocations) {
             jdbc.sql("""
                     INSERT INTO app.receivable_allocations(
                         id, receivable_id, payment_transaction_id, amount, allocated_at
@@ -271,10 +349,10 @@ public class ReservationAmendmentLedgerSupport {
                     )
                     """)
                 .param("receivableId", receivableId)
-                .param("txId", txId)
-                .param("amount", amountDue)
+                .param("txId", alloc.txId())
+                .param("amount", alloc.amount())
                 .update();
-        });
+        }
 
         return receivableId;
     }

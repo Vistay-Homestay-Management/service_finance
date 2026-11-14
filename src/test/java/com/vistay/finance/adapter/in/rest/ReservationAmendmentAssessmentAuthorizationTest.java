@@ -206,13 +206,35 @@ class ReservationAmendmentAssessmentAuthorizationTest {
     }
 
     @Test
-    @DisplayName("Field group projection: authorized actor requesting FINANCIAL receives FINANCIAL")
+    @DisplayName("Field group projection: Scope.ALL without explicit field grant remains fail-closed to RESERVATION_SUMMARY")
+    @SuppressWarnings("unchecked")
+    void parseFieldGroups_allScopeWithoutExplicitFieldGrant_remainsSummaryOnly() {
+        // Actor has Scope.ALL on actions, but NO explicit field group grant
+        when(authorizationClient.require(accountId, FinanceOperationalAuthorization.RESERVATION_DECISION_VIEW))
+            .thenReturn(new Snapshot(true, profileId, 1L, Map.of(
+                FinanceOperationalAuthorization.RESERVATION_DECISION_VIEW, Set.of(Scope.ALL),
+                FinanceOperationalAuthorization.FINANCE_READ, Set.of(Scope.ALL)
+            ), Map.of()));
+
+        when(assessmentService.getFinalDecision(eq(bookingId), eq("prop-1"), any(), any(), any()))
+            .thenReturn(dummyResponse());
+
+        controller.getDecision(jwt, bookingId, "prop-1", null, null, null, null, "FINANCIAL");
+
+        ArgumentCaptor<Set<ReservationFieldGroup>> captor = ArgumentCaptor.forClass(Set.class);
+        verify(assessmentService).getFinalDecision(eq(bookingId), eq("prop-1"), any(), any(), captor.capture());
+
+        assertThat(captor.getValue()).containsExactly(ReservationFieldGroup.RESERVATION_SUMMARY);
+    }
+
+    @Test
+    @DisplayName("Field group projection: actor with explicit finance:field:financial grant receives FINANCIAL")
     @SuppressWarnings("unchecked")
     void parseFieldGroups_authorizedActorRequestingFinancial_succeeds() {
         when(authorizationClient.require(accountId, FinanceOperationalAuthorization.RESERVATION_DECISION_VIEW))
             .thenReturn(new Snapshot(true, profileId, 1L, Map.of(
                 FinanceOperationalAuthorization.RESERVATION_DECISION_VIEW, Set.of(Scope.ALL),
-                FinanceOperationalAuthorization.FINANCE_READ, Set.of(Scope.ALL)
+                "finance:field:financial", Set.of(Scope.ALL)
             ), Map.of()));
 
         when(assessmentService.getFinalDecision(eq(bookingId), eq("prop-1"), any(), any(), any()))

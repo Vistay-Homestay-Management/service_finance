@@ -139,6 +139,44 @@ public class ReservationAmendmentAssessmentController {
         return ResponseEntity.ok(response);
     }
 
+    @PostMapping("/verify-refund")
+    public ResponseEntity<ReservationAmendmentAssessmentResponse> verifyRefund(
+        @AuthenticationPrincipal Jwt jwt,
+        @RequestParam UUID bookingId,
+        @RequestParam String proposalId,
+        @RequestParam(required = false) UUID propertyId,
+        @RequestParam(required = false) UUID customerId,
+        @RequestParam(required = false) Long expectedVersion,
+        @RequestParam String idempotencyKey,
+        @RequestParam(required = false) String correlationId,
+        @RequestHeader(value = "X-Field-Groups", required = false) String fieldGroupsHeader
+    ) {
+        var actor = authorization.require(jwt, FinanceOperationalAuthorization.RESERVATION_DECISION_VIEW);
+        var scopeContext = assessmentService.resolveAuthoritativeScope(bookingId, proposalId);
+        if (propertyId != null && !propertyId.equals(scopeContext.propertyId())) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN,
+                "Cross-branch property mismatch with authoritative record");
+        }
+        if (customerId != null && !customerId.equals(scopeContext.customerId())) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN,
+                "Customer mismatch with authoritative record");
+        }
+        authorization.requireReservationAccess(actor, bookingId, scopeContext.propertyId(), scopeContext.customerId());
+
+        Set<ReservationFieldGroup> effectiveGroups = resolveEffectiveFieldGroups(actor, fieldGroupsHeader);
+        ReservationAmendmentAssessmentResponse response = assessmentService.verifyRefundDue(
+            bookingId,
+            proposalId,
+            expectedVersion,
+            idempotencyKey,
+            correlationId,
+            actor.profileId(),
+            effectiveGroups
+        );
+
+        return ResponseEntity.ok(response);
+    }
+
     @PostMapping("/waiver")
     public ResponseEntity<ReservationAmendmentAssessmentResponse> approveWaiver(
         @AuthenticationPrincipal Jwt jwt,

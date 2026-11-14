@@ -169,11 +169,17 @@ public class ReservationAmendmentAssessmentService {
             ? cmd.correlationId().trim()
             : UUID.randomUUID().toString();
 
+        var authoritativeScope = resolveOrVerifyAssessScope(
+            cmd.bookingId(),
+            cmd.afterSnapshot().propertyId(),
+            cmd.afterSnapshot().customerId()
+        );
+
         ReservationAmendmentAssessment assessment = new ReservationAmendmentAssessment(
             UUID.randomUUID(),
             cmd.bookingId(),
-            cmd.afterSnapshot().propertyId(),
-            cmd.afterSnapshot().customerId(),
+            authoritativeScope.propertyId(),
+            authoritativeScope.customerId(),
             cmd.proposalId(),
             revision,
             beforeFp,
@@ -275,6 +281,13 @@ public class ReservationAmendmentAssessmentService {
                     "Supplied property " + suppliedPropertyId + " does not match authoritative booking property " + b.propertyId()
                 );
             }
+            if (suppliedCustomerId != null && b.customerId() != null && !suppliedCustomerId.equals(b.customerId())) {
+                throw new ReservationAmendmentException(
+                    HttpStatus.FORBIDDEN,
+                    "CUSTOMER_MISMATCH",
+                    "Supplied customer " + suppliedCustomerId + " does not match authoritative booking customer " + b.customerId()
+                );
+            }
             return new AuthoritativeScopeContext(b.propertyId(), b.customerId());
         }
         var latestAssessments = assessmentRepository.findByBookingIdOrderByCreatedAtDesc(bookingId);
@@ -287,9 +300,20 @@ public class ReservationAmendmentAssessmentService {
                     "Supplied property " + suppliedPropertyId + " does not match authoritative booking property " + a.getPropertyId()
                 );
             }
+            if (suppliedCustomerId != null && a.getCustomerId() != null && !suppliedCustomerId.equals(a.getCustomerId())) {
+                throw new ReservationAmendmentException(
+                    HttpStatus.FORBIDDEN,
+                    "CUSTOMER_MISMATCH",
+                    "Supplied customer " + suppliedCustomerId + " does not match authoritative booking customer " + a.getCustomerId()
+                );
+            }
             return new AuthoritativeScopeContext(a.getPropertyId(), a.getCustomerId());
         }
-        return new AuthoritativeScopeContext(suppliedPropertyId, suppliedCustomerId);
+        throw new ReservationAmendmentException(
+            HttpStatus.NOT_FOUND,
+            "BOOKING_SNAPSHOT_NOT_FOUND",
+            "Authoritative booking snapshot not found for booking " + bookingId
+        );
     }
 
     @Transactional(readOnly = true)
@@ -433,6 +457,102 @@ public class ReservationAmendmentAssessmentService {
         }
 
         return ReservationAmendmentAssessmentResponse.fromEntity(assessment, grantedGroups, false, false);
+    }
+
+    @Transactional
+    public ReservationAmendmentAssessmentResponse verifyRefundDue(
+        UUID bookingId,
+        String proposalId,
+        Long expectedVersion,
+        String idempotencyKey,
+        String correlationId,
+        UUID actorId,
+        Set<ReservationFieldGroup> grantedGroups
+    ) {
+        ReservationAmendmentAssessment assessment = assessmentRepository.findCurrentForUpdate(
+            bookingId,
+            proposalId
+        ).orElseThrow(() -> new ReservationAmendmentException(
+            HttpStatus.NOT_FOUND,
+            "ASSESSMENT_NOT_FOUND",
+            "No current amendment assessment found for booking " + bookingId + " proposal " + proposalId
+        ));
+
+        if (expectedVersion != null && !expectedVersion.equals(assessment.getVersion())) {
+            throw new ReservationAmendmentException(
+                HttpStatus.CONFLICT,
+                "OPTIMISTIC_LOCK_CONFLICT",
+                "Amendment assessment version mismatch"
+            );
+        }
+
+        if (assessment.getStatus() != AmendmentAssessmentStatus.REFUND_DUE) {
+            throw new ReservationAmendmentException(
+                HttpStatus.CONFLICT,
+                "INVALID_STATUS_FOR_REFUND_VERIFICATION",
+                "Refund verification is only allowed when assessment is in REFUND_DUE status, current: " + assessment.getStatus()
+            );
+        }
+
+        Instant now = Instant.now();
+        if (!assessment.getExpiresAt().isAfter(now)) {
+            throw new ReservationAmendmentException(
+                HttpStatus.CONFLICT,
+                "HOLD_OR_PROPOSAL_EXPIRED",
+                "Amendment hold or proposal has expired"
+            );
+        }
+
+        // Verify refund evidence: booking must have a succeeded original payment transaction
+        // with sufficient unrefunded capacity to cover the required refund delta
+        BigDecimal totalPaid = paymentTransactionRepository.calculateTotalPaidAmountByBookingId(bookingId);
+        if (totalPaid == null) totalPaid = BigDecimal.ZERO;
+        BigDecimal totalRefunded = paymentTransactionRepository.calculateTotalRefundedAmountByBookingId(bookingId);
+        if (totalRefunded == null) totalRefunded = BigDecimal.ZERO;
+        BigDecimal refundableCapacity = totalPaid.subtract(totalRefunded);
+
+        BigDecimal refundDueAmount = assessment.getDeltaAmount().abs();
+        if (refundableCapacity.compareTo(refundDueAmount) < 0) {
+            throw new ReservationAmendmentException(
+                HttpStatus.CONFLICT,
+                "INSUFFICIENT_REFUNDABLE_FUNDS",
+                "Insufficient refundable funds on original payment transactions to satisfy amendment refund"
+            );
+        }
+
+        assessment.verifyRefundSatisfied(now);
+        ReservationAmendmentAssessment saved = assessmentRepository.saveAndFlush(assessment);
+
+        Map<String, Object> outbox = Map.of(
+            "assessmentId", saved.getId().toString(),
+            "bookingId", saved.getBookingId().toString(),
+            "proposalId", saved.getProposalId(),
+            "status", saved.getStatus().name(),
+            "refundDueAmount", refundDueAmount.toPlainString()
+        );
+
+        ledgerSupport.recordOutboxEvent(
+            "RESERVATION_AMENDMENT_ASSESSMENT",
+            saved.getId(),
+            saved.getVersion(),
+            "vistay.finance.amendment-refund-verified.v1",
+            1,
+            outbox,
+            correlationId,
+            idempotencyKey
+        );
+
+        ledgerSupport.recordAuditEvent(
+            actorId,
+            "VERIFY_AMENDMENT_REFUND",
+            "RESERVATION_AMENDMENT_ASSESSMENT",
+            saved.getId(),
+            outbox,
+            correlationId
+        );
+
+        recordMetric("verified_refund", saved.getStatus().name());
+        return ReservationAmendmentAssessmentResponse.fromEntity(saved, grantedGroups, true, false);
     }
 
     @Transactional

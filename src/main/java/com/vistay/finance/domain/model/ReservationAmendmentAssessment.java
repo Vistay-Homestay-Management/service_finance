@@ -201,6 +201,15 @@ public class ReservationAmendmentAssessment {
         this.updatedAt = at != null ? at : Instant.now();
     }
 
+    public void verifyRefundSatisfied(Instant at) {
+        if (this.status != AmendmentAssessmentStatus.REFUND_DUE) {
+            throw new IllegalStateException("Cannot verify refund in status " + this.status + "; only REFUND_DUE can be verified");
+        }
+        // Assessed obligation delta remains immutable across the assessment lifecycle
+        this.status = AmendmentAssessmentStatus.VERIFIED;
+        this.updatedAt = at != null ? at : Instant.now();
+    }
+
     public void approveWaiver(UUID checkerAdminUserId, String reason, Instant at) {
         if (this.status != AmendmentAssessmentStatus.WAIVER_REVIEW
             && this.status != AmendmentAssessmentStatus.COLLECTION_REQUIRED) {
