@@ -16,6 +16,21 @@ public record ReconcileRefundOutcomeCommand(
 
     String failureMessage,
 
+    String paymentProvider,
+
+    String externalTransactionId,
+
     @NotBlank(message = "correlationId cannot be blank")
     String correlationId
-) {}
+) {
+    public ReconcileRefundOutcomeCommand(
+        UUID obligationId,
+        UUID refundId,
+        boolean success,
+        String failureCode,
+        String failureMessage,
+        String correlationId
+    ) {
+        this(obligationId, refundId, success, failureCode, failureMessage, null, null, correlationId);
+    }
+}

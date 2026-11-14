@@ -5,10 +5,7 @@ import com.vistay.finance.adapter.in.rest.FinanceOperationalAuthorization;
 import com.vistay.finance.adapter.in.rest.FinanceOperationalAuthorization.Actor;
 import com.vistay.finance.application.dto.*;
 import com.vistay.finance.domain.model.*;
-import com.vistay.finance.domain.repository.FinanceCommandIdempotencyRepository;
-import com.vistay.finance.domain.repository.PaymentTransactionRepository;
-import com.vistay.finance.domain.repository.RefundRepository;
-import com.vistay.finance.domain.repository.ReservationCancellationObligationRepository;
+import com.vistay.finance.domain.repository.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.jdbc.core.simple.JdbcClient;
@@ -33,6 +30,7 @@ public class ReservationCancellationObligationService {
     private final FinanceCommandIdempotencyRepository idempotencyRepository;
     private final PaymentTransactionRepository paymentTransactionRepository;
     private final RefundRepository refundRepository;
+    private final RuleCatalogueRepository ruleCatalogueRepository;
     private final FinanceOperationalAuthorization authorization;
     private final JdbcClient jdbc;
     private final ObjectMapper objectMapper;
@@ -42,6 +40,7 @@ public class ReservationCancellationObligationService {
         FinanceCommandIdempotencyRepository idempotencyRepository,
         PaymentTransactionRepository paymentTransactionRepository,
         RefundRepository refundRepository,
+        RuleCatalogueRepository ruleCatalogueRepository,
         FinanceOperationalAuthorization authorization,
         JdbcClient jdbc,
         ObjectMapper objectMapper
@@ -50,9 +49,26 @@ public class ReservationCancellationObligationService {
         this.idempotencyRepository = idempotencyRepository;
         this.paymentTransactionRepository = paymentTransactionRepository;
         this.refundRepository = refundRepository;
+        this.ruleCatalogueRepository = ruleCatalogueRepository;
         this.authorization = authorization;
         this.jdbc = jdbc;
         this.objectMapper = objectMapper;
+    }
+
+    /**
+     * Backward-compatible constructor for existing tests and components.
+     */
+    public ReservationCancellationObligationService(
+        ReservationCancellationObligationRepository obligationRepository,
+        FinanceCommandIdempotencyRepository idempotencyRepository,
+        PaymentTransactionRepository paymentTransactionRepository,
+        RefundRepository refundRepository,
+        FinanceOperationalAuthorization authorization,
+        JdbcClient jdbc,
+        ObjectMapper objectMapper
+    ) {
+        this(obligationRepository, idempotencyRepository, paymentTransactionRepository,
+             refundRepository, null, authorization, jdbc, objectMapper);
     }
 
     /**
@@ -61,11 +77,16 @@ public class ReservationCancellationObligationService {
      */
     @Transactional(readOnly = true)
     public CancellationPreviewResponse getVerifiedCollectedAdvanceForCancellation(UUID bookingId, Actor actor) {
+        return getVerifiedCollectedAdvanceForCancellation(bookingId, null, actor);
+    }
+
+    @Transactional(readOnly = true)
+    public CancellationPreviewResponse getVerifiedCollectedAdvanceForCancellation(UUID bookingId, UUID propertyId, Actor actor) {
         if (bookingId == null) {
             throw new IllegalArgumentException("Booking ID cannot be null");
         }
         if (actor != null) {
-            authorization.requireBooking(actor, bookingId);
+            authorization.requireReservationAccess(actor, bookingId, propertyId, null);
         }
 
         List<PaymentTransaction> transactions = paymentTransactionRepository.findByBookingIdOrderByOccurredAtDesc(bookingId);
@@ -134,15 +155,17 @@ public class ReservationCancellationObligationService {
             throw new IllegalArgumentException("Command cannot be null");
         }
 
-        // 1. Authorization checks
+        // 1. Authorization checks via Scope alternatives
         if (actor != null) {
-            authorization.requireBooking(actor, cmd.bookingId());
-            if (cmd.propertyId() != null) {
-                authorization.requireProperty(actor, cmd.propertyId());
-            }
+            authorization.requireReservationAccess(actor, cmd.bookingId(), cmd.propertyId(), null);
         }
 
-        // 2. Command Idempotency check
+        // 2. Trust boundary & format validation (Finding B)
+        if (cmd.cancellationQuoteFingerprint() == null || !cmd.cancellationQuoteFingerprint().matches("^[a-fA-F0-9]{64}$")) {
+            throw new IllegalArgumentException("INVALID_QUOTE_FINGERPRINT: Cancellation quote fingerprint must be a 64-character SHA-256 hex string");
+        }
+
+        // 3. Command Idempotency check
         String requestHash = computeSha256(
             "CANCEL_CMD:" + cmd.bookingId() + ":" + cmd.cancellationQuoteId() + ":"
                 + cmd.cancellationQuoteFingerprint() + ":" + cmd.verifiedCollectedAmount()
@@ -175,7 +198,7 @@ public class ReservationCancellationObligationService {
         );
         idempotencyRepository.save(idempotency);
 
-        // 3. Event deduplication via processed_events
+        // 4. Event deduplication via processed_events (Fix Finding F: Do not leave key in PROCESSING on replay)
         int eventInserted = jdbc.sql("""
                 INSERT INTO app.processed_events(event_id, consumer_name)
                 VALUES (:eventId, :consumer)
@@ -189,11 +212,32 @@ public class ReservationCancellationObligationService {
             log.info("Event {} already processed by consumer {}", cmd.sourceEventId(), CONSUMER_NAME);
             var existing = obligationRepository.findBySourceEventId(cmd.sourceEventId());
             if (existing.isPresent()) {
-                return CancellationObligationResponse.from(existing.get());
+                var ob = existing.get();
+                // Validate payload consistency with existing obligation
+                if (!ob.getBookingId().equals(cmd.bookingId())
+                    || !ob.getCancellationQuoteId().equals(cmd.cancellationQuoteId())
+                    || ob.getVerifiedCollectedAmount().compareTo(cmd.verifiedCollectedAmount()) != 0
+                    || ob.getRefundableAmount().compareTo(cmd.refundableAmount()) != 0
+                    || ob.getForfeitedAmount().compareTo(cmd.forfeitedAmount()) != 0) {
+                    idempotency.markFailed("EVENT_PAYLOAD_MISMATCH");
+                    idempotencyRepository.save(idempotency);
+                    throw new IllegalStateException("EVENT_PAYLOAD_MISMATCH: Source event " + cmd.sourceEventId() + " already processed with differing payload");
+                }
+
+                // Complete idempotency key with original immutable response
+                String replayPayload = String.format(
+                    "{\"obligationId\":\"%s\",\"bookingId\":\"%s\",\"cancellationQuoteId\":\"%s\",\"refundableAmount\":\"%s\",\"forfeitedAmount\":\"%s\",\"status\":\"%s\",\"correlationId\":\"%s\"}",
+                    ob.getId(), ob.getBookingId(), ob.getCancellationQuoteId(),
+                    ob.getRefundableAmount(), ob.getForfeitedAmount(), ob.getStatus(), ob.getCorrelationId()
+                );
+                idempotency.markSucceeded("ReservationCancellationObligation", ob.getId(), replayPayload);
+                idempotencyRepository.save(idempotency);
+
+                return CancellationObligationResponse.from(ob);
             }
         }
 
-        // 4. Invariant 1: refundable + forfeited == verifiedCollected
+        // 5. Invariant 1: refundable + forfeited == verifiedCollected
         BigDecimal expectedTotal = cmd.refundableAmount().add(cmd.forfeitedAmount());
         if (expectedTotal.compareTo(cmd.verifiedCollectedAmount()) != 0) {
             idempotency.markFailed("BALANCE_INVARIANT_VIOLATED");
@@ -202,7 +246,7 @@ public class ReservationCancellationObligationService {
                 + ") + forfeited (" + cmd.forfeitedAmount() + ") does not equal verified collected (" + cmd.verifiedCollectedAmount() + ")");
         }
 
-        // 5. Invariant 2: verified collected advance check against Finance ledger
+        // 6. Invariant 2: verified collected advance check against Finance ledger
         BigDecimal ledgerAdvance = calculateVerifiedAdvance(cmd.bookingId());
         if (cmd.verifiedCollectedAmount().compareTo(ledgerAdvance) != 0) {
             idempotency.markFailed("VERIFIED_COLLECTION_MISMATCH");
@@ -211,12 +255,41 @@ public class ReservationCancellationObligationService {
                 + cmd.verifiedCollectedAmount() + ") differs from Finance ledger verified advance (" + ledgerAdvance + ")");
         }
 
-        // 6. Invariant 3: Special refund reason required for 100% refund or special refund
+        // Ledger currency check
+        List<PaymentTransaction> bookingTransactions = paymentTransactionRepository.findByBookingIdOrderByOccurredAtDesc(cmd.bookingId());
+        String ledgerCurrency = bookingTransactions.stream()
+            .filter(t -> t.getCurrency() != null && !t.getCurrency().isBlank())
+            .map(PaymentTransaction::getCurrency)
+            .findFirst()
+            .orElse("VND");
+
+        if (cmd.currency() != null && !cmd.currency().equalsIgnoreCase(ledgerCurrency)) {
+            idempotency.markFailed("CURRENCY_MISMATCH");
+            idempotencyRepository.save(idempotency);
+            throw new IllegalArgumentException("CURRENCY_MISMATCH: Command currency (" + cmd.currency()
+                + ") does not match ledger currency (" + ledgerCurrency + ")");
+        }
+
+        // 7. Invariant 3: Special refund reason & evidence required for 100% refund
         if (cmd.forfeitedAmount().compareTo(BigDecimal.ZERO) == 0 && cmd.refundableAmount().compareTo(BigDecimal.ZERO) > 0) {
             if (cmd.specialRefundReasonCode() == null || cmd.specialRefundReasonCode().trim().length() < 3) {
                 idempotency.markFailed("SPECIAL_REFUND_REASON_REQUIRED");
                 idempotencyRepository.save(idempotency);
                 throw new IllegalArgumentException("SPECIAL_REFUND_REASON_REQUIRED: Special 100% refund requires explicit reason code of at least 3 characters");
+            }
+            if (cmd.specialRefundEvidenceRef() == null || cmd.specialRefundEvidenceRef().trim().isBlank()) {
+                idempotency.markFailed("SPECIAL_REFUND_EVIDENCE_REQUIRED");
+                idempotencyRepository.save(idempotency);
+                throw new IllegalArgumentException("SPECIAL_REFUND_EVIDENCE_REQUIRED: Special 100% refund requires explicit source evidence reference");
+            }
+        }
+
+        // 8. Rule catalogue verification if policy rule specified
+        if (cmd.policyRuleId() != null && ruleCatalogueRepository != null) {
+            if (!ruleCatalogueRepository.existsById(cmd.policyRuleId())) {
+                idempotency.markFailed("POLICY_RULE_NOT_FOUND");
+                idempotencyRepository.save(idempotency);
+                throw new IllegalStateException("POLICY_RULE_NOT_FOUND: Policy rule " + cmd.policyRuleId() + " does not exist in rule catalogue");
             }
         }
 
@@ -227,7 +300,7 @@ public class ReservationCancellationObligationService {
             throw new IllegalStateException("OBLIGATION_ALREADY_EXISTS: Cancellation obligation already exists for booking: " + cmd.bookingId());
         }
 
-        // 7. Create Obligation
+        // 8. Create Obligation
         ReservationCancellationObligation obligation = new ReservationCancellationObligation(
             UUID.randomUUID(),
             cmd.bookingId(),
@@ -239,14 +312,14 @@ public class ReservationCancellationObligationService {
             cmd.verifiedCollectedAmount(),
             cmd.refundableAmount(),
             cmd.forfeitedAmount(),
-            cmd.currency() != null ? cmd.currency() : "VND",
+            cmd.currency() != null ? cmd.currency() : ledgerCurrency,
             cmd.specialRefundReasonCode(),
             cmd.specialRefundEvidenceRef(),
             cmd.sourceEventId(),
             cmd.correlationId()
         );
 
-        // 8. If refundable > 0, create refund request in refunds ledger
+        // 9. If refundable > 0, create refund request in refunds ledger
         if (cmd.refundableAmount().compareTo(BigDecimal.ZERO) > 0) {
             UUID originalTxId = findOriginalTransactionId(cmd.bookingId());
             String refundCode = "RFD-CANCEL-" + UUID.randomUUID().toString().substring(0, 8).toUpperCase();
@@ -269,7 +342,7 @@ public class ReservationCancellationObligationService {
 
         ReservationCancellationObligation saved = obligationRepository.save(obligation);
 
-        // 9. Emit transactional outbox event
+        // 10. Emit transactional outbox event
         String eventPayload = String.format(
             "{\"obligationId\":\"%s\",\"bookingId\":\"%s\",\"cancellationQuoteId\":\"%s\",\"refundableAmount\":\"%s\",\"forfeitedAmount\":\"%s\",\"status\":\"%s\",\"correlationId\":\"%s\"}",
             saved.getId(), saved.getBookingId(), saved.getCancellationQuoteId(),
@@ -293,7 +366,7 @@ public class ReservationCancellationObligationService {
             .param("correlationId", saved.getCorrelationId())
             .update();
 
-        // 10. Mark idempotency succeeded
+        // 11. Mark idempotency succeeded
         idempotency.markSucceeded("ReservationCancellationObligation", saved.getId(), eventPayload);
         idempotencyRepository.save(idempotency);
 
@@ -303,6 +376,7 @@ public class ReservationCancellationObligationService {
 
     /**
      * Reconciles payment provider refund outcome without reactivating the booking.
+     * Enforces real PaymentTransaction FK and durable callback replay / repair (Findings A, E).
      */
     @Transactional
     public CancellationObligationResponse reconcileRefundOutcome(ReconcileRefundOutcomeCommand cmd) {
@@ -313,14 +387,68 @@ public class ReservationCancellationObligationService {
         ReservationCancellationObligation obligation = obligationRepository.findById(cmd.obligationId())
             .orElseThrow(() -> new NoSuchElementException("Cancellation obligation not found: " + cmd.obligationId()));
 
-        if (cmd.success()) {
-            obligation.markRefunded();
-            if (obligation.getRefundId() != null) {
-                refundRepository.findById(obligation.getRefundId()).ifPresent(refund -> {
-                    refund.markCompleted(UUID.randomUUID());
-                    refundRepository.save(refund);
-                });
+        // Finding E: Verify refund identity match if refundId provided in callback
+        if (cmd.refundId() != null && obligation.getRefundId() != null && !cmd.refundId().equals(obligation.getRefundId())) {
+            throw new IllegalArgumentException("REFUND_IDENTITY_MISMATCH: Callback refund ID " + cmd.refundId()
+                + " does not match obligation refund ID " + obligation.getRefundId());
+        }
+
+        // Finding E: Durable callback replay / contradictory callback ordering
+        if (obligation.getStatus() == CancellationObligationStatus.REFUNDED) {
+            if (cmd.success()) {
+                log.info("Idempotent replay of successful refund reconciliation for obligation {}", obligation.getId());
+                return CancellationObligationResponse.from(obligation);
+            } else {
+                log.warn("Ignoring late contradictory failure callback for already completed refund on obligation {}", obligation.getId());
+                return CancellationObligationResponse.from(obligation);
             }
+        }
+
+        if (obligation.getStatus() == CancellationObligationStatus.REFUND_FAILED && !cmd.success()) {
+            log.info("Idempotent replay of failed refund reconciliation for obligation {}", obligation.getId());
+            return CancellationObligationResponse.from(obligation);
+        }
+
+        if (cmd.success()) {
+            // Finding A: Create real, immutable REFUND PaymentTransaction to satisfy DB FK refunds.refund_transaction_id -> payment_transactions.id
+            if (obligation.getRefundId() != null) {
+                Refund refund = refundRepository.findById(obligation.getRefundId()).orElse(null);
+                if (refund != null) {
+                    if (refund.getRefundTransactionId() == null) {
+                        String txCode = "TX-RFD-" + UUID.randomUUID().toString().substring(0, 8).toUpperCase();
+                        String txIdempKey = "tx-refund:" + refund.getId();
+
+                        PaymentTransaction refundTx = paymentTransactionRepository.findByIdempotencyKey(txIdempKey)
+                            .orElseGet(() -> {
+                                PaymentTransaction tx = new PaymentTransaction(
+                                    UUID.randomUUID(),
+                                    txCode,
+                                    null,
+                                    null,
+                                    refund.getOriginalTransactionId(),
+                                    refund.getBookingId(),
+                                    TransactionType.REFUND,
+                                    refund.getAmount(),
+                                    refund.getCurrency(),
+                                    PaymentMethod.BANK_TRANSFER,
+                                    null,
+                                    cmd.paymentProvider() != null && !cmd.paymentProvider().isBlank() ? cmd.paymentProvider() : "VIETQR",
+                                    cmd.externalTransactionId() != null && !cmd.externalTransactionId().isBlank() ? cmd.externalTransactionId() : ("ext-" + UUID.randomUUID()),
+                                    TransactionStatus.SUCCEEDED,
+                                    txIdempKey,
+                                    "Cancellation refund completed for booking " + refund.getBookingId(),
+                                    refund.getRequestedByAdminUserId() != null ? refund.getRequestedByAdminUserId() : UUID.randomUUID()
+                                );
+                                tx.markSucceeded();
+                                return paymentTransactionRepository.save(tx);
+                            });
+
+                        refund.markCompleted(refundTx.getId());
+                        refundRepository.save(refund);
+                    }
+                }
+            }
+            obligation.markRefunded();
             log.info("Reconciled refund outcome SUCCESS for obligation {}", obligation.getId());
         } else {
             // Failure stays REFUND_FAILED and repairable. Never reactivates booking.

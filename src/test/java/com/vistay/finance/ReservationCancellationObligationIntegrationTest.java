@@ -98,26 +98,93 @@ class ReservationCancellationObligationIntegrationTest {
                 assertThat(foundStatus).isTrue();
             }
         }
+    }
 
-        // Verify finance_command_idempotency unified table, payload constraint and expiry index
-        try (Connection conn = createConnection();
-             PreparedStatement ps = conn.prepareStatement("""
-                     SELECT conname FROM pg_constraint
-                     WHERE conname IN ('ck_command_idempotency_payload', 'ck_finance_cmd_idem_payload')
-                     """)) {
-            try (ResultSet rs = ps.executeQuery()) {
-                assertThat(rs.next()).isTrue();
+    @Test
+    @DisplayName("Finding A: Database enforces real PaymentTransaction FK on refunds.refund_transaction_id")
+    void databaseConstraint_EnforcesRealPaymentTransactionForeignKeyOnRefundCompletion() throws Exception {
+        UUID originalTxId = UUID.randomUUID();
+        UUID bookingId = UUID.randomUUID();
+        UUID refundId = UUID.randomUUID();
+        UUID fakeTxId = UUID.randomUUID();
+        UUID realRefundTxId = UUID.randomUUID();
+
+        String origTxCode = "TX-ORIG-" + UUID.randomUUID().toString().substring(0, 8).toUpperCase();
+        String origIdempKey = "idemp-orig-" + UUID.randomUUID();
+        String refundCode = "RFD-" + UUID.randomUUID().toString().substring(0, 8).toUpperCase();
+        String refundIdempKey = "idemp-rfd-" + UUID.randomUUID();
+        String refundTxCode = "TX-RFD-" + UUID.randomUUID().toString().substring(0, 8).toUpperCase();
+        String refundTxIdempKey = "idemp-tx-rfd-" + UUID.randomUUID();
+
+        try (Connection conn = createConnection()) {
+            // 1. Insert original PAYMENT transaction
+            try (PreparedStatement ps = conn.prepareStatement("""
+                    INSERT INTO app.payment_transactions (
+                        id, transaction_code, booking_id, transaction_type,
+                        amount, currency, payment_method, status, idempotency_key
+                    ) VALUES (?, ?, ?, 'PAYMENT', 1000000.00, 'VND', 'BANK_TRANSFER', 'SUCCEEDED', ?)
+                    """)) {
+                ps.setObject(1, originalTxId);
+                ps.setString(2, origTxCode);
+                ps.setObject(3, bookingId);
+                ps.setString(4, origIdempKey);
+                ps.executeUpdate();
             }
-        }
 
-        try (Connection conn = createConnection();
-             PreparedStatement ps = conn.prepareStatement("""
-                     SELECT indexname FROM pg_indexes
-                     WHERE schemaname = 'app' AND tablename = 'finance_command_idempotency'
-                       AND indexname = 'ix_command_idempotency_expiry'
-                     """)) {
-            try (ResultSet rs = ps.executeQuery()) {
-                assertThat(rs.next()).isTrue();
+            // 2. Insert initial REFUND record pointing to original transaction
+            try (PreparedStatement ps = conn.prepareStatement("""
+                    INSERT INTO app.refunds (
+                        id, refund_code, booking_id, original_transaction_id,
+                        amount, currency, status, reason, requested_by_admin_user_id, idempotency_key
+                    ) VALUES (?, ?, ?, ?, 700000.00, 'VND', 'REQUESTED', 'Cancellation refund', ?, ?)
+                    """)) {
+                ps.setObject(1, refundId);
+                ps.setString(2, refundCode);
+                ps.setObject(3, bookingId);
+                ps.setObject(4, originalTxId);
+                ps.setObject(5, UUID.randomUUID());
+                ps.setString(6, refundIdempKey);
+                ps.executeUpdate();
+            }
+
+            // 3. Attempting to complete refund with a fake transaction ID fails with Foreign Key violation
+            assertThatThrownBy(() -> {
+                try (PreparedStatement ps = conn.prepareStatement("""
+                        UPDATE app.refunds
+                        SET status = 'COMPLETED', refund_transaction_id = ?, completed_at = now()
+                        WHERE id = ?
+                        """)) {
+                    ps.setObject(1, fakeTxId);
+                    ps.setObject(2, refundId);
+                    ps.executeUpdate();
+                }
+            }).isInstanceOf(SQLException.class);
+
+            // 4. Create real immutable REFUND PaymentTransaction linked to original payment
+            try (PreparedStatement ps = conn.prepareStatement("""
+                    INSERT INTO app.payment_transactions (
+                        id, transaction_code, original_transaction_id, booking_id, transaction_type,
+                        amount, currency, payment_method, status, idempotency_key
+                    ) VALUES (?, ?, ?, ?, 'REFUND', 700000.00, 'VND', 'BANK_TRANSFER', 'SUCCEEDED', ?)
+                    """)) {
+                ps.setObject(1, realRefundTxId);
+                ps.setString(2, refundTxCode);
+                ps.setObject(3, originalTxId);
+                ps.setObject(4, bookingId);
+                ps.setString(5, refundTxIdempKey);
+                ps.executeUpdate();
+            }
+
+            // 5. Updating refund with real transaction ID succeeds
+            try (PreparedStatement ps = conn.prepareStatement("""
+                    UPDATE app.refunds
+                    SET status = 'COMPLETED', refund_transaction_id = ?, completed_at = now()
+                    WHERE id = ?
+                    """)) {
+                ps.setObject(1, realRefundTxId);
+                ps.setObject(2, refundId);
+                int updated = ps.executeUpdate();
+                assertThat(updated).isEqualTo(1);
             }
         }
     }

@@ -1,38 +1,5 @@
 SET search_path TO app, extensions, public;
 
--- Idempotency storage for externally-invoked Finance commands
-CREATE TABLE IF NOT EXISTS finance_command_idempotency (
-    idempotency_key varchar(160) PRIMARY KEY,
-    command_type varchar(80) NOT NULL,
-    actor_type varchar(24) NOT NULL CHECK (actor_type IN ('ADMIN', 'CUSTOMER', 'SYSTEM')),
-    actor_id uuid NOT NULL,
-    request_hash char(64) NOT NULL,
-    status varchar(24) NOT NULL CHECK (status IN ('PROCESSING', 'SUCCEEDED', 'FAILED')),
-    resource_type varchar(64),
-    resource_id uuid,
-    response_payload jsonb,
-    error_code varchar(80),
-    expires_at timestamptz NOT NULL,
-    created_at timestamptz NOT NULL DEFAULT now(),
-    completed_at timestamptz,
-    CONSTRAINT ck_command_idempotency_payload CHECK (response_payload IS NULL OR jsonb_typeof(response_payload) = 'object')
-);
-
--- Ensure payload check constraint exists even if table was created by another migration without it
-DO $$
-BEGIN
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint 
-        WHERE conname IN ('ck_command_idempotency_payload', 'ck_finance_cmd_idem_payload')
-    ) THEN
-        ALTER TABLE finance_command_idempotency
-        ADD CONSTRAINT ck_command_idempotency_payload CHECK (response_payload IS NULL OR jsonb_typeof(response_payload) = 'object');
-    END IF;
-END $$;
-
--- Ensure expiry index exists regardless of migration order
-CREATE INDEX IF NOT EXISTS ix_command_idempotency_expiry ON finance_command_idempotency(status, expires_at);
-
 -- SCRUM-569: Finance cancellation obligation ledger
 CREATE TABLE IF NOT EXISTS reservation_cancellation_obligations (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -59,10 +26,8 @@ CREATE TABLE IF NOT EXISTS reservation_cancellation_obligations (
     updated_at timestamptz NOT NULL DEFAULT now(),
     CONSTRAINT ck_cancel_obligation_amounts CHECK (verified_collected_amount >= 0 AND refundable_amount >= 0 AND forfeited_amount >= 0),
     CONSTRAINT ck_cancel_obligation_balance CHECK (refundable_amount + forfeited_amount = verified_collected_amount),
-    CONSTRAINT ck_cancel_obligation_currency CHECK (currency ~ '^[A-Z]{3}$'),
-    CONSTRAINT ck_cancel_obligation_status CHECK (status IN ('PENDING', 'REFUND_DUE', 'NO_REFUND', 'REFUND_REQUESTED', 'REFUNDED', 'REFUND_FAILED')),
-    CONSTRAINT ck_cancel_special_refund CHECK (special_refund_reason_code IS NULL OR length(trim(special_refund_reason_code)) >= 3)
+    CONSTRAINT ck_cancel_obligation_status CHECK (status IN ('PENDING', 'REFUND_DUE', 'REFUND_REQUESTED', 'REFUNDED', 'FORFEITED', 'REFUND_FAILED', 'NO_REFUND'))
 );
 
 CREATE INDEX IF NOT EXISTS ix_cancel_obligation_property ON reservation_cancellation_obligations(property_id);
-CREATE INDEX IF NOT EXISTS ix_cancel_obligation_status ON reservation_cancellation_obligations(status, updated_at DESC);
+CREATE INDEX IF NOT EXISTS ix_cancel_obligation_status ON reservation_cancellation_obligations(status);

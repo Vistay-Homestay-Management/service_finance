@@ -10,6 +10,7 @@ import com.vistay.finance.domain.repository.FinanceCommandIdempotencyRepository;
 import com.vistay.finance.domain.repository.PaymentTransactionRepository;
 import com.vistay.finance.domain.repository.RefundRepository;
 import com.vistay.finance.domain.repository.ReservationCancellationObligationRepository;
+import com.vistay.finance.domain.repository.RuleCatalogueRepository;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -31,6 +32,8 @@ import static org.mockito.Mockito.*;
 @ExtendWith(MockitoExtension.class)
 class ReservationCancellationObligationServiceTest {
 
+    private static final String VALID_FINGERPRINT = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+
     @Mock
     private ReservationCancellationObligationRepository obligationRepository;
 
@@ -42,6 +45,9 @@ class ReservationCancellationObligationServiceTest {
 
     @Mock
     private RefundRepository refundRepository;
+
+    @Mock
+    private RuleCatalogueRepository ruleCatalogueRepository;
 
     @Mock
     private FinanceOperationalAuthorization authorization;
@@ -64,11 +70,13 @@ class ReservationCancellationObligationServiceTest {
     @BeforeEach
     void setUp() {
         mockJdbcOutboxAndProcessedEvents();
+        lenient().when(ruleCatalogueRepository.existsById(any())).thenReturn(true);
         service = new ReservationCancellationObligationService(
             obligationRepository,
             idempotencyRepository,
             paymentTransactionRepository,
             refundRepository,
+            ruleCatalogueRepository,
             authorization,
             jdbc,
             new ObjectMapper()
@@ -112,7 +120,7 @@ class ReservationCancellationObligationServiceTest {
         assertThat(response.currency()).isEqualTo("VND");
         assertThat(response.calculationSnapshotHash()).isNotBlank();
         assertThat(response.transactionCount()).isEqualTo(1);
-        verify(authorization).requireBooking(actor, bookingId);
+        verify(authorization).requireReservationAccess(actor, bookingId, null, null);
     }
 
     @Test
@@ -149,7 +157,7 @@ class ReservationCancellationObligationServiceTest {
         when(refundRepository.save(any(Refund.class))).thenAnswer(inv -> inv.getArgument(0));
 
         ExecuteCancellationCommand cmd = new ExecuteCancellationCommand(
-            sourceEventId, bookingId, propertyId, quoteId, "fingerprint-abc-123",
+            sourceEventId, bookingId, propertyId, quoteId, VALID_FINGERPRINT,
             UUID.randomUUID(), 1, verified, refundable, forfeited, "VND",
             null, null, "corr-101", "idemp-cancel-001"
         );
@@ -166,7 +174,7 @@ class ReservationCancellationObligationServiceTest {
 
         verify(refundRepository).save(any(Refund.class));
         verify(obligationRepository).save(any(ReservationCancellationObligation.class));
-        verify(idempotencyRepository, atLeastOnce()).save(argThat(i -> "SUCCEEDED".equalsIgnoreCase(i.getStatus())));
+        verify(idempotencyRepository, atLeastOnce()).save(argThat(FinanceCommandIdempotency::isSucceeded));
     }
 
     @Test
@@ -184,7 +192,7 @@ class ReservationCancellationObligationServiceTest {
             .thenAnswer(inv -> inv.getArgument(0));
 
         ExecuteCancellationCommand cmd = new ExecuteCancellationCommand(
-            sourceEventId, bookingId, propertyId, quoteId, "fingerprint-000",
+            sourceEventId, bookingId, propertyId, quoteId, VALID_FINGERPRINT,
             UUID.randomUUID(), 1, verified, refundable, forfeited, "VND",
             null, null, "corr-102", "idemp-cancel-002"
         );
@@ -198,7 +206,7 @@ class ReservationCancellationObligationServiceTest {
     }
 
     @Test
-    @DisplayName("AC01: 100% special refund with valid reason code succeeds")
+    @DisplayName("AC01: 100% special refund with valid reason code and evidence ref succeeds")
     void executeCancellation_SpecialRefund100Percent_Succeeds() {
         mockJdbcOutboxAndProcessedEvents();
         BigDecimal verified = new BigDecimal("1500000.0000");
@@ -213,7 +221,7 @@ class ReservationCancellationObligationServiceTest {
         when(refundRepository.save(any(Refund.class))).thenAnswer(inv -> inv.getArgument(0));
 
         ExecuteCancellationCommand cmd = new ExecuteCancellationCommand(
-            sourceEventId, bookingId, propertyId, quoteId, "fingerprint-special-100",
+            sourceEventId, bookingId, propertyId, quoteId, VALID_FINGERPRINT,
             UUID.randomUUID(), 1, verified, refundable, forfeited, "VND",
             "HOST_EMERGENCY_OVERBOOKED", "EVIDENCE_DOC_999", "corr-103", "idemp-cancel-003"
         );
@@ -240,7 +248,7 @@ class ReservationCancellationObligationServiceTest {
         when(idempotencyRepository.findByIdempotencyKey(anyString())).thenReturn(Optional.empty());
 
         ExecuteCancellationCommand cmd = new ExecuteCancellationCommand(
-            sourceEventId, bookingId, propertyId, quoteId, "fingerprint-bad-balance",
+            sourceEventId, bookingId, propertyId, quoteId, VALID_FINGERPRINT,
             UUID.randomUUID(), 1, verified, refundable, forfeited, "VND",
             null, null, "corr-104", "idemp-cancel-004"
         );
@@ -263,7 +271,7 @@ class ReservationCancellationObligationServiceTest {
         when(idempotencyRepository.findByIdempotencyKey(anyString())).thenReturn(Optional.empty());
 
         ExecuteCancellationCommand cmd = new ExecuteCancellationCommand(
-            sourceEventId, bookingId, propertyId, quoteId, "fingerprint-ledger-diff",
+            sourceEventId, bookingId, propertyId, quoteId, VALID_FINGERPRINT,
             UUID.randomUUID(), 1, quoteVerified, new BigDecimal("1500000.0000"), new BigDecimal("500000.0000"),
             "VND", null, null, "corr-105", "idemp-cancel-005"
         );
@@ -277,6 +285,59 @@ class ReservationCancellationObligationServiceTest {
     }
 
     @Test
+    @DisplayName("AC02: Policy rule not found in catalogue fails closed")
+    void executeCancellation_PolicyRuleNotFound_FailsClosed() {
+        BigDecimal verified = new BigDecimal("2000000.0000");
+        mockLedgerVerifiedAdvance(verified);
+
+        when(idempotencyRepository.findByIdempotencyKey(anyString())).thenReturn(Optional.empty());
+        when(ruleCatalogueRepository.existsById(any())).thenReturn(false);
+
+        ExecuteCancellationCommand cmd = new ExecuteCancellationCommand(
+            sourceEventId, bookingId, propertyId, quoteId, VALID_FINGERPRINT,
+            UUID.randomUUID(), 1, verified, new BigDecimal("1400000.0000"), new BigDecimal("600000.0000"),
+            "VND", null, null, "corr-rule-404", "idemp-rule-404"
+        );
+
+        assertThatThrownBy(() -> service.processCancellationExecution(cmd, actor))
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("POLICY_RULE_NOT_FOUND");
+    }
+
+    @Test
+    @DisplayName("AC02: Non-hex or invalid length quote fingerprint fails closed")
+    void executeCancellation_InvalidFingerprint_FailsClosed() {
+        ExecuteCancellationCommand cmd = new ExecuteCancellationCommand(
+            sourceEventId, bookingId, propertyId, quoteId, "invalid-short-fp",
+            UUID.randomUUID(), 1, new BigDecimal("1000000"), new BigDecimal("500000"), new BigDecimal("500000"),
+            "VND", null, null, "corr-invalid-fp", "idemp-invalid-fp"
+        );
+
+        assertThatThrownBy(() -> service.processCancellationExecution(cmd, actor))
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("INVALID_QUOTE_FINGERPRINT");
+    }
+
+    @Test
+    @DisplayName("AC02: Currency mismatch between command and ledger fails closed")
+    void executeCancellation_CurrencyMismatch_FailsClosed() {
+        BigDecimal verified = new BigDecimal("1000000.0000");
+        mockLedgerVerifiedAdvance(verified); // ledger is VND
+
+        when(idempotencyRepository.findByIdempotencyKey(anyString())).thenReturn(Optional.empty());
+
+        ExecuteCancellationCommand cmd = new ExecuteCancellationCommand(
+            sourceEventId, bookingId, propertyId, quoteId, VALID_FINGERPRINT,
+            UUID.randomUUID(), 1, verified, new BigDecimal("600000.0000"), new BigDecimal("400000.0000"),
+            "USD", null, null, "corr-curr-diff", "idemp-curr-diff"
+        );
+
+        assertThatThrownBy(() -> service.processCancellationExecution(cmd, actor))
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("CURRENCY_MISMATCH");
+    }
+
+    @Test
     @DisplayName("AC02: 100% special refund missing reason code fails closed")
     void executeCancellation_SpecialRefundMissingReason_FailsClosed() {
         BigDecimal verified = new BigDecimal("2000000.0000");
@@ -285,7 +346,7 @@ class ReservationCancellationObligationServiceTest {
         when(idempotencyRepository.findByIdempotencyKey(anyString())).thenReturn(Optional.empty());
 
         ExecuteCancellationCommand cmd = new ExecuteCancellationCommand(
-            sourceEventId, bookingId, propertyId, quoteId, "fingerprint-no-reason",
+            sourceEventId, bookingId, propertyId, quoteId, VALID_FINGERPRINT,
             UUID.randomUUID(), 1, verified, verified, BigDecimal.ZERO, "VND",
             null, null, "corr-106", "idemp-cancel-006"
         );
@@ -293,6 +354,25 @@ class ReservationCancellationObligationServiceTest {
         assertThatThrownBy(() -> service.processCancellationExecution(cmd, actor))
             .isInstanceOf(IllegalArgumentException.class)
             .hasMessageContaining("SPECIAL_REFUND_REASON_REQUIRED");
+    }
+
+    @Test
+    @DisplayName("AC02: 100% special refund missing evidence ref fails closed")
+    void executeCancellation_SpecialRefundMissingEvidence_FailsClosed() {
+        BigDecimal verified = new BigDecimal("2000000.0000");
+        mockLedgerVerifiedAdvance(verified);
+
+        when(idempotencyRepository.findByIdempotencyKey(anyString())).thenReturn(Optional.empty());
+
+        ExecuteCancellationCommand cmd = new ExecuteCancellationCommand(
+            sourceEventId, bookingId, propertyId, quoteId, VALID_FINGERPRINT,
+            UUID.randomUUID(), 1, verified, verified, BigDecimal.ZERO, "VND",
+            "HOST_EMERGENCY", "   ", "corr-no-ev", "idemp-no-ev"
+        );
+
+        assertThatThrownBy(() -> service.processCancellationExecution(cmd, actor))
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("SPECIAL_REFUND_EVIDENCE_REQUIRED");
     }
 
     @Test
@@ -307,7 +387,7 @@ class ReservationCancellationObligationServiceTest {
         when(idempotencyRepository.findByIdempotencyKey("idemp-key-shared")).thenReturn(Optional.of(existing));
 
         ExecuteCancellationCommand cmd = new ExecuteCancellationCommand(
-            sourceEventId, bookingId, propertyId, quoteId, "fingerprint-diff",
+            sourceEventId, bookingId, propertyId, quoteId, VALID_FINGERPRINT,
             UUID.randomUUID(), 1, new BigDecimal("1000000"), new BigDecimal("500000"), new BigDecimal("500000"),
             "VND", null, null, "corr-107", "idemp-key-shared"
         );
@@ -329,13 +409,13 @@ class ReservationCancellationObligationServiceTest {
         BigDecimal forfeited = new BigDecimal("300000.0000");
 
         ExecuteCancellationCommand cmd = new ExecuteCancellationCommand(
-            sourceEventId, bookingId, propertyId, quoteId, "fingerprint-exact",
+            sourceEventId, bookingId, propertyId, quoteId, VALID_FINGERPRINT,
             UUID.randomUUID(), 1, verified, refundable, forfeited, "VND",
             null, null, "corr-108", "idemp-exact-replay"
         );
 
         // Precompute matching hash
-        String expectedHash = "CANCEL_CMD:" + bookingId + ":" + quoteId + ":fingerprint-exact:"
+        String expectedHash = "CANCEL_CMD:" + bookingId + ":" + quoteId + ":" + VALID_FINGERPRINT + ":"
             + verified + ":" + refundable + ":" + forfeited;
         try {
             var md = java.security.MessageDigest.getInstance("SHA-256");
@@ -353,7 +433,7 @@ class ReservationCancellationObligationServiceTest {
         when(idempotencyRepository.findByIdempotencyKey("idemp-exact-replay")).thenReturn(Optional.of(existing));
 
         ReservationCancellationObligation storedObligation = new ReservationCancellationObligation(
-            UUID.randomUUID(), bookingId, propertyId, quoteId, "fingerprint-exact",
+            UUID.randomUUID(), bookingId, propertyId, quoteId, VALID_FINGERPRINT,
             UUID.randomUUID(), 1, verified, refundable, forfeited, "VND",
             null, null, sourceEventId, "corr-108"
         );
@@ -369,6 +449,183 @@ class ReservationCancellationObligationServiceTest {
     }
 
     @Test
+    @DisplayName("Finding F: Source event replay completes idempotency key instead of leaving it in PROCESSING")
+    void executeCancellation_SourceEventReplay_CompletesIdempotencyKey() {
+        BigDecimal verified = new BigDecimal("1000000.0000");
+        BigDecimal refundable = new BigDecimal("700000.0000");
+        BigDecimal forfeited = new BigDecimal("300000.0000");
+
+        ExecuteCancellationCommand cmd = new ExecuteCancellationCommand(
+            sourceEventId, bookingId, propertyId, quoteId, VALID_FINGERPRINT,
+            UUID.randomUUID(), 1, verified, refundable, forfeited, "VND",
+            null, null, "corr-dedup", "idemp-key-new"
+        );
+
+        when(idempotencyRepository.findByIdempotencyKey("idemp-key-new")).thenReturn(Optional.empty());
+
+        // Simulate processed_events conflict (event already processed)
+        when(jdbc.sql(anyString())).thenReturn(statementSpec);
+        when(statementSpec.param(anyString(), any())).thenReturn(statementSpec);
+        when(statementSpec.update()).thenReturn(0);
+
+        ReservationCancellationObligation existingObligation = new ReservationCancellationObligation(
+            UUID.randomUUID(), bookingId, propertyId, quoteId, VALID_FINGERPRINT,
+            UUID.randomUUID(), 1, verified, refundable, forfeited, "VND",
+            null, null, sourceEventId, "corr-dedup"
+        );
+        when(obligationRepository.findBySourceEventId(sourceEventId)).thenReturn(Optional.of(existingObligation));
+
+        CancellationObligationResponse response = service.processCancellationExecution(cmd, actor);
+
+        assertThat(response).isNotNull();
+        assertThat(response.bookingId()).isEqualTo(bookingId);
+
+        // Verify that the new idempotency key was marked SUCCEEDED with existing obligation snapshot
+        ArgumentCaptor<FinanceCommandIdempotency> captor = ArgumentCaptor.forClass(FinanceCommandIdempotency.class);
+        verify(idempotencyRepository, atLeast(2)).save(captor.capture());
+        FinanceCommandIdempotency lastSaved = captor.getValue();
+        assertThat(lastSaved.isSucceeded()).isTrue();
+        assertThat(lastSaved.getResourceId()).isEqualTo(existingObligation.getId());
+    }
+
+    @Test
+    @DisplayName("Finding F: Source event replay with differing payload fails closed with EVENT_PAYLOAD_MISMATCH")
+    void executeCancellation_SourceEventReplayWithDifferentPayload_FailsClosed() {
+        BigDecimal verified = new BigDecimal("1000000.0000");
+        BigDecimal refundable = new BigDecimal("700000.0000");
+        BigDecimal forfeited = new BigDecimal("300000.0000");
+
+        ExecuteCancellationCommand cmd = new ExecuteCancellationCommand(
+            sourceEventId, bookingId, propertyId, quoteId, VALID_FINGERPRINT,
+            UUID.randomUUID(), 1, verified, refundable, forfeited, "VND",
+            null, null, "corr-mismatch", "idemp-key-mismatch"
+        );
+
+        when(idempotencyRepository.findByIdempotencyKey("idemp-key-mismatch")).thenReturn(Optional.empty());
+
+        when(jdbc.sql(anyString())).thenReturn(statementSpec);
+        when(statementSpec.param(anyString(), any())).thenReturn(statementSpec);
+        when(statementSpec.update()).thenReturn(0);
+
+        // Existing obligation had differing refundable amount (500000 instead of 700000)
+        ReservationCancellationObligation existingObligation = new ReservationCancellationObligation(
+            UUID.randomUUID(), bookingId, propertyId, quoteId, VALID_FINGERPRINT,
+            UUID.randomUUID(), 1, verified, new BigDecimal("500000.0000"), new BigDecimal("500000.0000"),
+            "VND", null, null, sourceEventId, "corr-mismatch"
+        );
+        when(obligationRepository.findBySourceEventId(sourceEventId)).thenReturn(Optional.of(existingObligation));
+
+        assertThatThrownBy(() -> service.processCancellationExecution(cmd, actor))
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("EVENT_PAYLOAD_MISMATCH");
+
+        verify(idempotencyRepository, atLeastOnce()).save(argThat(FinanceCommandIdempotency::isFailed));
+    }
+
+    @Test
+    @DisplayName("Finding A & AC03: Provider refund success creates real PaymentTransaction and marks refund completed")
+    void reconcileRefundOutcome_Success_CreatesRealPaymentTransactionAndCompletesRefund() {
+        mockJdbcOutboxAndProcessedEvents();
+        UUID obligationId = UUID.randomUUID();
+        UUID refundId = UUID.randomUUID();
+        UUID originalTxId = UUID.randomUUID();
+
+        ReservationCancellationObligation obligation = new ReservationCancellationObligation(
+            obligationId, bookingId, propertyId, quoteId, VALID_FINGERPRINT,
+            UUID.randomUUID(), 1, new BigDecimal("1000000"), new BigDecimal("700000"), new BigDecimal("300000"),
+            "VND", null, null, sourceEventId, "corr-110"
+        );
+        obligation.markRefundRequested(refundId);
+
+        when(obligationRepository.findById(obligationId)).thenReturn(Optional.of(obligation));
+        when(obligationRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
+
+        Refund refund = new Refund(
+            refundId, "RFD-TEST", bookingId, originalTxId, new BigDecimal("700000"),
+            "VND", "Reason", adminProfileId, "idemp-ref"
+        );
+        when(refundRepository.findById(refundId)).thenReturn(Optional.of(refund));
+
+        when(paymentTransactionRepository.findByIdempotencyKey(anyString())).thenReturn(Optional.empty());
+        when(paymentTransactionRepository.save(any(PaymentTransaction.class))).thenAnswer(inv -> inv.getArgument(0));
+
+        ReconcileRefundOutcomeCommand reconcileCmd = new ReconcileRefundOutcomeCommand(
+            obligationId, refundId, true, null, null, "VIETQR", "ext-vietqr-999", "corr-110"
+        );
+
+        CancellationObligationResponse result = service.reconcileRefundOutcome(reconcileCmd);
+
+        assertThat(result.status()).isEqualTo(CancellationObligationStatus.REFUNDED.name());
+
+        // Verify PaymentTransaction created with real data and linked to original transaction
+        ArgumentCaptor<PaymentTransaction> txCaptor = ArgumentCaptor.forClass(PaymentTransaction.class);
+        verify(paymentTransactionRepository).save(txCaptor.capture());
+        PaymentTransaction savedTx = txCaptor.getValue();
+        assertThat(savedTx.getTransactionType()).isEqualTo(TransactionType.REFUND);
+        assertThat(savedTx.getStatus()).isEqualTo(TransactionStatus.SUCCEEDED);
+        assertThat(savedTx.getAmount()).isEqualByComparingTo(new BigDecimal("700000"));
+        assertThat(savedTx.getOriginalTransactionId()).isEqualTo(originalTxId);
+        assertThat(savedTx.getPaymentProvider()).isEqualTo("VIETQR");
+        assertThat(savedTx.getExternalTransactionId()).isEqualTo("ext-vietqr-999");
+
+        // Verify Refund completed with savedTx.getId()
+        assertThat(refund.getStatus()).isEqualTo(RefundStatus.COMPLETED);
+        assertThat(refund.getRefundTransactionId()).isEqualTo(savedTx.getId());
+    }
+
+    @Test
+    @DisplayName("Finding E: Callback with mismatched refundId fails closed with REFUND_IDENTITY_MISMATCH")
+    void reconcileRefundOutcome_MismatchedRefundId_FailsClosed() {
+        UUID obligationId = UUID.randomUUID();
+        UUID actualRefundId = UUID.randomUUID();
+        UUID wrongRefundId = UUID.randomUUID();
+
+        ReservationCancellationObligation obligation = new ReservationCancellationObligation(
+            obligationId, bookingId, propertyId, quoteId, VALID_FINGERPRINT,
+            UUID.randomUUID(), 1, new BigDecimal("1000000"), new BigDecimal("700000"), new BigDecimal("300000"),
+            "VND", null, null, sourceEventId, "corr-mismatch"
+        );
+        obligation.markRefundRequested(actualRefundId);
+
+        when(obligationRepository.findById(obligationId)).thenReturn(Optional.of(obligation));
+
+        ReconcileRefundOutcomeCommand reconcileCmd = new ReconcileRefundOutcomeCommand(
+            obligationId, wrongRefundId, true, null, null, "corr-mismatch"
+        );
+
+        assertThatThrownBy(() -> service.reconcileRefundOutcome(reconcileCmd))
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("REFUND_IDENTITY_MISMATCH");
+    }
+
+    @Test
+    @DisplayName("Finding E: Idempotent replay of already REFUNDED obligation returns result without recreating transaction")
+    void reconcileRefundOutcome_AlreadyRefunded_ReturnsExistingWithoutSideEffects() {
+        UUID obligationId = UUID.randomUUID();
+        UUID refundId = UUID.randomUUID();
+
+        ReservationCancellationObligation obligation = new ReservationCancellationObligation(
+            obligationId, bookingId, propertyId, quoteId, VALID_FINGERPRINT,
+            UUID.randomUUID(), 1, new BigDecimal("1000000"), new BigDecimal("700000"), new BigDecimal("300000"),
+            "VND", null, null, sourceEventId, "corr-replay"
+        );
+        obligation.markRefundRequested(refundId);
+        obligation.markRefunded();
+
+        when(obligationRepository.findById(obligationId)).thenReturn(Optional.of(obligation));
+
+        ReconcileRefundOutcomeCommand reconcileCmd = new ReconcileRefundOutcomeCommand(
+            obligationId, refundId, true, null, null, "corr-replay"
+        );
+
+        CancellationObligationResponse result = service.reconcileRefundOutcome(reconcileCmd);
+
+        assertThat(result.status()).isEqualTo(CancellationObligationStatus.REFUNDED.name());
+        verify(paymentTransactionRepository, never()).save(any());
+        verify(refundRepository, never()).save(any());
+    }
+
+    @Test
     @DisplayName("AC03: Provider refund failure transitions obligation to REFUND_FAILED and never reactivates booking")
     void reconcileRefundOutcome_Failure_SetsRefundFailedWithoutAffectingBooking() {
         mockJdbcOutboxAndProcessedEvents();
@@ -376,7 +633,7 @@ class ReservationCancellationObligationServiceTest {
         UUID refundId = UUID.randomUUID();
 
         ReservationCancellationObligation obligation = new ReservationCancellationObligation(
-            obligationId, bookingId, propertyId, quoteId, "fingerprint-fail-test",
+            obligationId, bookingId, propertyId, quoteId, VALID_FINGERPRINT,
             UUID.randomUUID(), 1, new BigDecimal("1000000"), new BigDecimal("700000"), new BigDecimal("300000"),
             "VND", null, null, sourceEventId, "corr-109"
         );
@@ -403,35 +660,5 @@ class ReservationCancellationObligationServiceTest {
 
         verify(refund).markFailed();
         verify(obligationRepository).save(argThat(o -> o.getStatus() == CancellationObligationStatus.REFUND_FAILED));
-    }
-
-    @Test
-    @DisplayName("AC03: Provider refund success transitions obligation to REFUNDED")
-    void reconcileRefundOutcome_Success_SetsRefunded() {
-        mockJdbcOutboxAndProcessedEvents();
-        UUID obligationId = UUID.randomUUID();
-        UUID refundId = UUID.randomUUID();
-
-        ReservationCancellationObligation obligation = new ReservationCancellationObligation(
-            obligationId, bookingId, propertyId, quoteId, "fingerprint-success-test",
-            UUID.randomUUID(), 1, new BigDecimal("1000000"), new BigDecimal("700000"), new BigDecimal("300000"),
-            "VND", null, null, sourceEventId, "corr-110"
-        );
-        obligation.markRefundRequested(refundId);
-
-        when(obligationRepository.findById(obligationId)).thenReturn(Optional.of(obligation));
-        when(obligationRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
-
-        Refund refund = mock(Refund.class);
-        when(refundRepository.findById(refundId)).thenReturn(Optional.of(refund));
-
-        ReconcileRefundOutcomeCommand reconcileCmd = new ReconcileRefundOutcomeCommand(
-            obligationId, refundId, true, null, null, "corr-110"
-        );
-
-        CancellationObligationResponse result = service.reconcileRefundOutcome(reconcileCmd);
-
-        assertThat(result.status()).isEqualTo(CancellationObligationStatus.REFUNDED.name());
-        verify(refund).markCompleted(any());
     }
 }

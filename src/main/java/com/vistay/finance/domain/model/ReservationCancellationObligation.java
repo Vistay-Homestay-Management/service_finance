@@ -1,9 +1,6 @@
 package com.vistay.finance.domain.model;
 
 import jakarta.persistence.*;
-import org.hibernate.annotations.JdbcTypeCode;
-import org.hibernate.type.SqlTypes;
-
 import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.UUID;
@@ -14,14 +11,14 @@ import java.util.UUID;
     schema = "app",
     indexes = {
         @Index(name = "ix_cancel_obligation_property", columnList = "property_id"),
-        @Index(name = "ix_cancel_obligation_status", columnList = "status, updated_at")
+        @Index(name = "ix_cancel_obligation_status", columnList = "status")
     }
 )
 public class ReservationCancellationObligation {
 
     @Id
-    @Column(name = "id", nullable = false, updatable = false)
-    private UUID id = UUID.randomUUID();
+    @Column(name = "id", nullable = false)
+    private UUID id;
 
     @Column(name = "booking_id", nullable = false, unique = true)
     private UUID bookingId;
@@ -32,7 +29,7 @@ public class ReservationCancellationObligation {
     @Column(name = "cancellation_quote_id", nullable = false, unique = true)
     private UUID cancellationQuoteId;
 
-    @Column(name = "cancellation_quote_fingerprint", nullable = false, length = 64)
+    @Column(name = "cancellation_quote_fingerprint", length = 64, nullable = false)
     private String cancellationQuoteFingerprint;
 
     @Column(name = "policy_rule_id")
@@ -41,18 +38,17 @@ public class ReservationCancellationObligation {
     @Column(name = "policy_rule_version")
     private Integer policyRuleVersion;
 
-    @Column(name = "verified_collected_amount", nullable = false, precision = 19, scale = 4)
+    @Column(name = "verified_collected_amount", precision = 19, scale = 4, nullable = false)
     private BigDecimal verifiedCollectedAmount;
 
-    @Column(name = "refundable_amount", nullable = false, precision = 19, scale = 4)
+    @Column(name = "refundable_amount", precision = 19, scale = 4, nullable = false)
     private BigDecimal refundableAmount;
 
-    @Column(name = "forfeited_amount", nullable = false, precision = 19, scale = 4)
+    @Column(name = "forfeited_amount", precision = 19, scale = 4, nullable = false)
     private BigDecimal forfeitedAmount;
 
-    @JdbcTypeCode(SqlTypes.CHAR)
-    @Column(name = "currency", nullable = false, length = 3, columnDefinition = "char(3)")
-    private String currency = "VND";
+    @Column(name = "currency", length = 3, nullable = false)
+    private String currency;
 
     @Column(name = "special_refund_reason_code", length = 64)
     private String specialRefundReasonCode;
@@ -64,8 +60,8 @@ public class ReservationCancellationObligation {
     private UUID refundId;
 
     @Enumerated(EnumType.STRING)
-    @Column(name = "status", nullable = false, length = 24)
-    private CancellationObligationStatus status = CancellationObligationStatus.PENDING;
+    @Column(name = "status", length = 24, nullable = false)
+    private CancellationObligationStatus status;
 
     @Column(name = "failure_code", length = 80)
     private String failureCode;
@@ -76,7 +72,7 @@ public class ReservationCancellationObligation {
     @Column(name = "source_event_id", nullable = false, unique = true)
     private UUID sourceEventId;
 
-    @Column(name = "correlation_id", nullable = false, length = 100)
+    @Column(name = "correlation_id", length = 100, nullable = false)
     private String correlationId;
 
     @Version
@@ -89,7 +85,8 @@ public class ReservationCancellationObligation {
     @Column(name = "updated_at", nullable = false)
     private Instant updatedAt = Instant.now();
 
-    protected ReservationCancellationObligation() {}
+    protected ReservationCancellationObligation() {
+    }
 
     public ReservationCancellationObligation(
         UUID id,
@@ -108,23 +105,6 @@ public class ReservationCancellationObligation {
         UUID sourceEventId,
         String correlationId
     ) {
-        if (verifiedCollectedAmount == null || verifiedCollectedAmount.compareTo(BigDecimal.ZERO) < 0) {
-            throw new IllegalArgumentException("verifiedCollectedAmount cannot be null or negative");
-        }
-        if (refundableAmount == null || refundableAmount.compareTo(BigDecimal.ZERO) < 0) {
-            throw new IllegalArgumentException("refundableAmount cannot be null or negative");
-        }
-        if (forfeitedAmount == null || forfeitedAmount.compareTo(BigDecimal.ZERO) < 0) {
-            throw new IllegalArgumentException("forfeitedAmount cannot be null or negative");
-        }
-        if (refundableAmount.add(forfeitedAmount).compareTo(verifiedCollectedAmount) != 0) {
-            throw new IllegalArgumentException("Balance invariant violated: refundable (" + refundableAmount
-                + ") + forfeited (" + forfeitedAmount + ") must equal verified collected (" + verifiedCollectedAmount + ")");
-        }
-        if (specialRefundReasonCode != null && specialRefundReasonCode.trim().length() < 3) {
-            throw new IllegalArgumentException("specialRefundReasonCode must be at least 3 characters if present");
-        }
-
         this.id = id != null ? id : UUID.randomUUID();
         this.bookingId = bookingId;
         this.propertyId = propertyId;
@@ -162,7 +142,9 @@ public class ReservationCancellationObligation {
     }
 
     public void markRefunded() {
-        if (this.status != CancellationObligationStatus.REFUND_REQUESTED && this.status != CancellationObligationStatus.REFUND_DUE) {
+        if (this.status != CancellationObligationStatus.REFUND_REQUESTED 
+            && this.status != CancellationObligationStatus.REFUND_DUE
+            && this.status != CancellationObligationStatus.REFUND_FAILED) {
             throw new IllegalStateException("Cannot transition to REFUNDED from status: " + this.status);
         }
         this.status = CancellationObligationStatus.REFUNDED;
@@ -171,7 +153,23 @@ public class ReservationCancellationObligation {
         this.updatedAt = Instant.now();
     }
 
+    public void retryRefund() {
+        if (this.status != CancellationObligationStatus.REFUND_FAILED) {
+            throw new IllegalStateException("Cannot retry refund from status: " + this.status);
+        }
+        this.status = CancellationObligationStatus.REFUND_REQUESTED;
+        this.failureCode = null;
+        this.failureMessage = null;
+        this.updatedAt = Instant.now();
+    }
+
     public void markRefundFailed(String failureCode, String failureMessage) {
+        if (this.status == CancellationObligationStatus.REFUND_FAILED) {
+            this.failureCode = failureCode;
+            this.failureMessage = failureMessage;
+            this.updatedAt = Instant.now();
+            return;
+        }
         if (this.status != CancellationObligationStatus.REFUND_REQUESTED && this.status != CancellationObligationStatus.REFUND_DUE) {
             throw new IllegalStateException("Cannot transition to REFUND_FAILED from status: " + this.status);
         }

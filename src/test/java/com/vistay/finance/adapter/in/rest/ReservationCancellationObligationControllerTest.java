@@ -1,6 +1,7 @@
 package com.vistay.finance.adapter.in.rest;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.*;
@@ -14,6 +15,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.oauth2.jwt.Jwt;
+import org.springframework.web.server.ResponseStatusException;
 
 import java.math.BigDecimal;
 import java.time.Instant;
@@ -44,24 +46,24 @@ class ReservationCancellationObligationControllerTest {
     }
 
     @Test
-    @DisplayName("Controller: Preview endpoint enforces RESERVATION_DECISION_VIEW and booking scope")
+    @DisplayName("Controller: Preview endpoint enforces RESERVATION_DECISION_VIEW and reservation access")
     void preview_EnforcesReservationDecisionView() {
         CancellationPreviewResponse expected = new CancellationPreviewResponse(
             bookingId, new BigDecimal("1000000"), "VND", 1, "hash-123", List.of()
         );
-        when(service.getVerifiedCollectedAdvanceForCancellation(bookingId, actor)).thenReturn(expected);
+        when(service.getVerifiedCollectedAdvanceForCancellation(bookingId, propertyId, actor)).thenReturn(expected);
 
-        ResponseEntity<CancellationPreviewResponse> response = controller.getCancellationPreview(jwt, bookingId);
+        ResponseEntity<CancellationPreviewResponse> response = controller.getCancellationPreview(jwt, bookingId, propertyId);
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
         assertThat(response.getBody()).isEqualTo(expected);
 
         verify(authorization).require(jwt, FinanceOperationalAuthorization.RESERVATION_DECISION_VIEW);
-        verify(authorization).requireBooking(actor, bookingId);
+        verify(authorization).requireReservationAccess(actor, bookingId, propertyId, null);
     }
 
     @Test
-    @DisplayName("Controller: Execution endpoint enforces CANCELLATION_ASSESS, REFUND_CREATE, and property scope")
+    @DisplayName("Controller: Execution endpoint enforces CANCELLATION_ASSESS, REFUND_CREATE, and reservation access")
     void execute_EnforcesCancellationAssessAndRefundCreate() {
         ExecuteCancellationCommand cmd = new ExecuteCancellationCommand(
             UUID.randomUUID(), bookingId, propertyId, UUID.randomUUID(), "fingerprint-ctrl",
@@ -84,14 +86,45 @@ class ReservationCancellationObligationControllerTest {
         assertThat(response.getBody()).isEqualTo(expected);
 
         verify(authorization).require(jwt, FinanceOperationalAuthorization.CANCELLATION_ASSESS);
-        verify(authorization).requireBooking(actor, bookingId);
-        verify(authorization).requireProperty(actor, propertyId);
+        verify(authorization, atLeastOnce()).requireReservationAccess(actor, bookingId, propertyId, null);
         verify(authorization).require(jwt, FinanceOperationalAuthorization.REFUND_CREATE);
     }
 
     @Test
-    @DisplayName("Controller: Reconcile endpoint enforces CANCELLATION_ASSESS and booking ownership")
-    void reconcile_EnforcesCancellationAssessAndBookingOwnership() {
+    @DisplayName("Finding C: When cancel has ALL scope but refund actor scope denied for branch partition, throws FORBIDDEN")
+    void execute_WhenRefundActorDeniedScope_ThrowsForbidden() {
+        ExecuteCancellationCommand cmd = new ExecuteCancellationCommand(
+            UUID.randomUUID(), bookingId, propertyId, UUID.randomUUID(), "fingerprint-ctrl",
+            UUID.randomUUID(), 1, new BigDecimal("1000000"), new BigDecimal("700000"),
+            new BigDecimal("300000"), "VND", null, null, "corr-ctrl", "idemp-ctrl"
+        );
+
+        var cancelActor = new FinanceOperationalAuthorization.Actor(UUID.randomUUID(), adminProfileId,
+            FinanceOperationalAuthorization.CANCELLATION_ASSESS,
+            new FinanceAuthorizationClient.Snapshot(true, adminProfileId, 1L, Map.of(), Map.of()));
+
+        var refundActor = new FinanceOperationalAuthorization.Actor(UUID.randomUUID(), adminProfileId,
+            FinanceOperationalAuthorization.REFUND_CREATE,
+            new FinanceAuthorizationClient.Snapshot(true, adminProfileId, 1L, Map.of(), Map.of()));
+
+        when(authorization.require(jwt, FinanceOperationalAuthorization.CANCELLATION_ASSESS)).thenReturn(cancelActor);
+        when(authorization.require(jwt, FinanceOperationalAuthorization.REFUND_CREATE)).thenReturn(refundActor);
+
+        // Cancel actor passes, but refund actor is denied scope for this property partition
+        doNothing().when(authorization).requireReservationAccess(cancelActor, bookingId, propertyId, null);
+        doThrow(new ResponseStatusException(HttpStatus.FORBIDDEN, "Record is outside the authorized scope for finance:refund:create"))
+            .when(authorization).requireReservationAccess(refundActor, bookingId, propertyId, null);
+
+        assertThatThrownBy(() -> controller.executeCancellation(jwt, cmd))
+            .isInstanceOf(ResponseStatusException.class)
+            .hasMessageContaining("outside the authorized scope for finance:refund:create");
+
+        verify(service, never()).processCancellationExecution(any(), any());
+    }
+
+    @Test
+    @DisplayName("Controller: Reconcile endpoint enforces CANCELLATION_ASSESS and reservation access")
+    void reconcile_EnforcesCancellationAssessAndReservationAccess() {
         CancellationObligationResponse existing = new CancellationObligationResponse(
             obligationId, bookingId, propertyId, UUID.randomUUID(), "fp",
             null, null, new BigDecimal("1000000"), new BigDecimal("700000"),
@@ -110,7 +143,7 @@ class ReservationCancellationObligationControllerTest {
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
         verify(authorization).require(jwt, FinanceOperationalAuthorization.CANCELLATION_ASSESS);
-        verify(authorization).requireBooking(actor, bookingId);
+        verify(authorization).requireReservationAccess(actor, bookingId, propertyId, null);
     }
 
     @Test

@@ -28,14 +28,15 @@ public class ReservationCancellationObligationController {
         this.authorization = authorization;
     }
 
-    @GetMapping("/preview/{bookingId}")
+    @GetMapping("/preview")
     public ResponseEntity<CancellationPreviewResponse> getCancellationPreview(
         @AuthenticationPrincipal Jwt jwt,
-        @PathVariable UUID bookingId
+        @RequestParam UUID bookingId,
+        @RequestParam(required = false) UUID propertyId
     ) {
         var actor = authorization.require(jwt, FinanceOperationalAuthorization.RESERVATION_DECISION_VIEW);
-        authorization.requireBooking(actor, bookingId);
-        return ResponseEntity.ok(obligationService.getVerifiedCollectedAdvanceForCancellation(bookingId, actor));
+        authorization.requireReservationAccess(actor, bookingId, propertyId, null);
+        return ResponseEntity.ok(obligationService.getVerifiedCollectedAdvanceForCancellation(bookingId, propertyId, actor));
     }
 
     @PostMapping("/obligations")
@@ -43,16 +44,17 @@ public class ReservationCancellationObligationController {
         @AuthenticationPrincipal Jwt jwt,
         @Valid @RequestBody ExecuteCancellationCommand command
     ) {
-        var actor = authorization.require(jwt, FinanceOperationalAuthorization.CANCELLATION_ASSESS);
-        authorization.requireBooking(actor, command.bookingId());
-        if (command.propertyId() != null) {
-            authorization.requireProperty(actor, command.propertyId());
-        }
+        // Enforce action and scope specifically for CANCELLATION_ASSESS
+        var cancelActor = authorization.require(jwt, FinanceOperationalAuthorization.CANCELLATION_ASSESS);
+        authorization.requireReservationAccess(cancelActor, command.bookingId(), command.propertyId(), null);
+
+        // Finding C: Enforce action and scope specifically for REFUND_CREATE (pairing grant + actor scope)
         if (command.refundableAmount() != null && command.refundableAmount().compareTo(BigDecimal.ZERO) > 0) {
-            authorization.require(jwt, FinanceOperationalAuthorization.REFUND_CREATE);
+            var refundActor = authorization.require(jwt, FinanceOperationalAuthorization.REFUND_CREATE);
+            authorization.requireReservationAccess(refundActor, command.bookingId(), command.propertyId(), null);
         }
 
-        CancellationObligationResponse response = obligationService.processCancellationExecution(command, actor);
+        CancellationObligationResponse response = obligationService.processCancellationExecution(command, cancelActor);
         return ResponseEntity.status(HttpStatus.CREATED).body(response);
     }
 
@@ -64,10 +66,10 @@ public class ReservationCancellationObligationController {
     ) {
         var actor = authorization.require(jwt, FinanceOperationalAuthorization.CANCELLATION_ASSESS);
         var existing = obligationService.getObligationById(id);
-        authorization.requireBooking(actor, existing.bookingId());
         if (!id.equals(command.obligationId())) {
             throw new IllegalArgumentException("Path obligation ID does not match command obligation ID");
         }
+        authorization.requireReservationAccess(actor, existing.bookingId(), existing.propertyId(), null);
         return ResponseEntity.ok(obligationService.reconcileRefundOutcome(command));
     }
 
@@ -78,7 +80,7 @@ public class ReservationCancellationObligationController {
     ) {
         var actor = authorization.require(jwt, FinanceOperationalAuthorization.RESERVATION_DECISION_VIEW);
         var response = obligationService.getObligationById(id);
-        authorization.requireBooking(actor, response.bookingId());
+        authorization.requireReservationAccess(actor, response.bookingId(), response.propertyId(), null);
         return ResponseEntity.ok(response);
     }
 
