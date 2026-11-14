@@ -1,5 +1,6 @@
 package com.vistay.finance.adapter.in.rest;
 
+import com.vistay.finance.application.service.ReservationAmendmentException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.MethodArgumentNotValidException;
@@ -13,6 +14,17 @@ import java.util.NoSuchElementException;
 
 @RestControllerAdvice
 public class GlobalFinanceExceptionHandler {
+
+    @ExceptionHandler(ReservationAmendmentException.class)
+    public ResponseEntity<Map<String, Object>> handleReservationAmendment(ReservationAmendmentException ex) {
+        Map<String, Object> body = new HashMap<>();
+        body.put("timestamp", Instant.now().toString());
+        body.put("status", ex.getStatus().value());
+        body.put("error", ex.getStatus().getReasonPhrase());
+        body.put("code", ex.getErrorCode());
+        body.put("message", ex.getMessage());
+        return ResponseEntity.status(ex.getStatus()).body(body);
+    }
 
     @ExceptionHandler(NoSuchElementException.class)
     public ResponseEntity<Map<String, Object>> handleNotFound(NoSuchElementException ex) {

@@ -32,7 +32,9 @@ public class FinanceOperationalAuthorization {
     public static final String FINANCE_EXPORT = "finance:export";
     public static final String CANCELLATION_ASSESS = "finance:cancellation:assess";
     public static final String REFUND_CREATE = "finance:refund:create";
+    public static final String RESERVATION_AMENDMENT_ASSESS = "finance:reservation-amendment:assess";
     public static final String RESERVATION_DECISION_VIEW = "finance:reservation-decision:view";
+    public static final String DEPOSIT_WAIVE = "finance:deposit:waive";
 
     private final FinanceAuthorizationClient authorizations;
     private final FinanceBookingAuthorizationClient bookings;
@@ -195,6 +197,29 @@ public class FinanceOperationalAuthorization {
         throw forbidden(actor.permission());
     }
 
+    public java.util.Set<com.vistay.finance.domain.model.ReservationFieldGroup> resolveAuthorizedFieldGroups(Actor actor) {
+        java.util.Set<com.vistay.finance.domain.model.ReservationFieldGroup> allowed = new java.util.HashSet<>();
+        allowed.add(com.vistay.finance.domain.model.ReservationFieldGroup.RESERVATION_SUMMARY);
+
+        if (actor == null || actor.snapshot() == null) {
+            return java.util.Set.copyOf(allowed);
+        }
+
+        var grants = actor.snapshot().grants();
+        // Fail-closed field group grants: requires explicit field permissions per authorization data matrix
+        // Scope.ALL or action permissions (finance:read) do not substitute for sensitive field group grants
+        if (grants.containsKey("finance:field:financial") || grants.containsKey("finance:field-group:financial")) {
+            allowed.add(com.vistay.finance.domain.model.ReservationFieldGroup.FINANCIAL);
+        }
+        if (grants.containsKey("finance:field:trust-detail") || grants.containsKey("finance:field-group:trust-detail")) {
+            allowed.add(com.vistay.finance.domain.model.ReservationFieldGroup.TRUST_DETAIL);
+        }
+        if (grants.containsKey("finance:field:internal-audit") || grants.containsKey("finance:field-group:internal-audit")) {
+            allowed.add(com.vistay.finance.domain.model.ReservationFieldGroup.INTERNAL_AUDIT);
+        }
+
+        return java.util.Set.copyOf(allowed);
+    }
     public UUID bindActor(Actor actor, UUID suppliedAdminUserId) {
         if (suppliedAdminUserId != null && !suppliedAdminUserId.equals(actor.profileId())) {
             throw new ResponseStatusException(HttpStatus.FORBIDDEN,

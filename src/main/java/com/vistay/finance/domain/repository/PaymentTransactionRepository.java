@@ -29,6 +29,15 @@ public interface PaymentTransactionRepository extends JpaRepository<PaymentTrans
     @Query("SELECT COALESCE(SUM(t.amount), 0) FROM PaymentTransaction t WHERE t.bookingId = :bookingId AND t.transactionType = 'PAYMENT' AND t.status = 'SUCCEEDED'")
     BigDecimal calculateTotalPaidAmountByBookingId(@Param("bookingId") UUID bookingId);
 
+    @Query("SELECT COALESCE(SUM(t.amount), 0) FROM PaymentTransaction t WHERE t.bookingId = :bookingId AND t.transactionType = 'REFUND' AND t.status = 'SUCCEEDED'")
+    BigDecimal calculateTotalRefundedAmountByBookingId(@Param("bookingId") UUID bookingId);
+
+    Optional<PaymentTransaction> findFirstByBookingIdAndTransactionTypeAndStatusOrderByOccurredAtDesc(
+        UUID bookingId,
+        TransactionType transactionType,
+        TransactionStatus status
+    );
+
     @Query("SELECT COALESCE(SUM(t.amount), 0) FROM PaymentTransaction t WHERE t.paymentRequestId = :paymentRequestId AND t.transactionType = 'PAYMENT' AND t.status = 'SUCCEEDED'")
     BigDecimal calculateTotalPaidAmountByRequestId(@Param("paymentRequestId") UUID paymentRequestId);
 }
