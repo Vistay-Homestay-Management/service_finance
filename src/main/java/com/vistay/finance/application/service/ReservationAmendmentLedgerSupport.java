@@ -33,6 +33,9 @@ public class ReservationAmendmentLedgerSupport {
 
     public record ExistingCommandRow(
         String idempotencyKey,
+        String commandType,
+        String actorType,
+        UUID actorId,
         String requestHash,
         String status,
         String resourceType,
@@ -40,6 +43,8 @@ public class ReservationAmendmentLedgerSupport {
         String responsePayload,
         String errorCode
     ) {}
+
+    public record BookingFinancialContext(UUID propertyId, UUID customerId) {}
 
     @Transactional(propagation = Propagation.MANDATORY)
     public IdempotencyRecord checkAndLockIdempotency(
@@ -50,8 +55,32 @@ public class ReservationAmendmentLedgerSupport {
         String requestHash,
         Instant expiresAt
     ) {
-        Optional<ExistingCommandRow> existing = jdbc.sql("""
-                SELECT idempotency_key, request_hash, status, resource_type, resource_id,
+        // Atomic claim using ON CONFLICT DO NOTHING to avoid PostgreSQL transaction aborts
+        int inserted = jdbc.sql("""
+                INSERT INTO app.finance_command_idempotency(
+                    idempotency_key, command_type, actor_type, actor_id,
+                    request_hash, status, expires_at, created_at
+                )
+                VALUES (
+                    :key, :commandType, :actorType, :actorId,
+                    :requestHash, 'PROCESSING', :expiresAt, now()
+                )
+                ON CONFLICT (idempotency_key) DO NOTHING
+                """)
+            .param("key", idempotencyKey)
+            .param("commandType", commandType)
+            .param("actorType", actorType)
+            .param("actorId", actorId)
+            .param("requestHash", requestHash)
+            .param("expiresAt", expiresAt)
+            .update();
+
+        if (inserted > 0) {
+            return new IdempotencyRecord(false, null, null);
+        }
+
+        ExistingCommandRow row = jdbc.sql("""
+                SELECT idempotency_key, command_type, actor_type, actor_id, request_hash, status, resource_type, resource_id,
                        response_payload::text AS response_payload, error_code
                 FROM app.finance_command_idempotency
                 WHERE idempotency_key = :key
@@ -59,56 +88,42 @@ public class ReservationAmendmentLedgerSupport {
                 """)
             .param("key", idempotencyKey)
             .query(ExistingCommandRow.class)
-            .optional();
+            .optional()
+            .orElseThrow(() -> new ReservationAmendmentException(
+                HttpStatus.INTERNAL_SERVER_ERROR,
+                "IDEMPOTENCY_CLAIM_LOST",
+                "Idempotency record not found after concurrent claim attempt"
+            ));
 
-        if (existing.isPresent()) {
-            ExistingCommandRow row = existing.get();
-            if (!row.requestHash().trim().equalsIgnoreCase(requestHash.trim())) {
-                throw new ReservationAmendmentException(
-                    HttpStatus.CONFLICT,
-                    "IDEMPOTENCY_KEY_REUSED",
-                    "Idempotency key has already been used with different request parameters"
-                );
-            }
-            if ("PROCESSING".equalsIgnoreCase(row.status())) {
-                throw new ReservationAmendmentException(
-                    HttpStatus.CONFLICT,
-                    "CONCURRENT_REQUEST_IN_FLIGHT",
-                    "A command with this idempotency key is currently processing"
-                );
-            }
-            if ("SUCCEEDED".equalsIgnoreCase(row.status())) {
-                return new IdempotencyRecord(true, row.resourceId(), row.responsePayload());
-            }
+        if (!row.requestHash().trim().equalsIgnoreCase(requestHash.trim())) {
             throw new ReservationAmendmentException(
-                HttpStatus.BAD_REQUEST,
-                row.errorCode() != null ? row.errorCode() : "PREVIOUS_COMMAND_FAILED",
-                "Previous command execution with this idempotency key failed"
+                HttpStatus.CONFLICT,
+                "IDEMPOTENCY_KEY_REUSED",
+                "Idempotency key has already been used with different request parameters"
             );
         }
-
-        try {
-            jdbc.sql("""
-                    INSERT INTO app.finance_command_idempotency(
-                        idempotency_key, command_type, actor_type, actor_id,
-                        request_hash, status, expires_at, created_at
-                    )
-                    VALUES (
-                        :key, :commandType, :actorType, :actorId,
-                        :requestHash, 'PROCESSING', :expiresAt, now()
-                    )
-                    """)
-                .param("key", idempotencyKey)
-                .param("commandType", commandType)
-                .param("actorType", actorType)
-                .param("actorId", actorId)
-                .param("requestHash", requestHash)
-                .param("expiresAt", expiresAt)
-                .update();
-            return new IdempotencyRecord(false, null, null);
-        } catch (DuplicateKeyException race) {
-            return checkAndLockIdempotency(idempotencyKey, commandType, actorType, actorId, requestHash, expiresAt);
+        if (!row.commandType().equals(commandType) || !row.actorId().equals(actorId)) {
+            throw new ReservationAmendmentException(
+                HttpStatus.CONFLICT,
+                "IDEMPOTENCY_KEY_REUSED",
+                "Idempotency key has already been used by a different actor or command type"
+            );
         }
+        if ("PROCESSING".equalsIgnoreCase(row.status())) {
+            throw new ReservationAmendmentException(
+                HttpStatus.CONFLICT,
+                "CONCURRENT_REQUEST_IN_FLIGHT",
+                "A command with this idempotency key is currently processing"
+            );
+        }
+        if ("SUCCEEDED".equalsIgnoreCase(row.status())) {
+            return new IdempotencyRecord(true, row.resourceId(), row.responsePayload());
+        }
+        throw new ReservationAmendmentException(
+            HttpStatus.BAD_REQUEST,
+            row.errorCode() != null ? row.errorCode() : "PREVIOUS_COMMAND_FAILED",
+            "Previous command execution with this idempotency key failed"
+        );
     }
 
     @Transactional(propagation = Propagation.MANDATORY)
@@ -180,6 +195,88 @@ public class ReservationAmendmentLedgerSupport {
             .param("bookingId", bookingId)
             .query(UUID.class)
             .optional();
+    }
+
+    @Transactional(propagation = Propagation.SUPPORTS)
+    public Optional<BookingFinancialContext> findBookingContext(UUID bookingId) {
+        return jdbc.sql("""
+                SELECT property_id, customer_id
+                FROM app.booking_financial_snapshots
+                WHERE booking_id = :bookingId
+                """)
+            .param("bookingId", bookingId)
+            .query((rs, rowNum) -> new BookingFinancialContext(
+                rs.getObject("property_id", UUID.class),
+                rs.getObject("customer_id", UUID.class)
+            ))
+            .optional();
+    }
+
+    @Transactional(propagation = Propagation.MANDATORY)
+    public UUID insertSettledCompensatingReceivable(
+        UUID bookingId,
+        UUID customerId,
+        String proposalId,
+        UUID executedEventId,
+        LocalDate dueDate,
+        BigDecimal amountDue,
+        String currency
+    ) {
+        UUID receivableId = UUID.randomUUID();
+        String receivableCode = "REC-AMD-" + receivableId.toString().substring(0, 8).toUpperCase();
+        String sourceKey = "amendment:" + bookingId + ":" + proposalId + ":" + executedEventId;
+        String description = "Compensating obligation for reservation amendment " + proposalId;
+
+        jdbc.sql("""
+                INSERT INTO app.receivables(
+                    id, receivable_code, source_key, booking_id,
+                    debtor_type, debtor_id, category, description,
+                    due_date, amount_due, amount_paid, amount_waived,
+                    currency, status, closed_at, created_at, updated_at
+                )
+                VALUES (
+                    :id, :code, :sourceKey, :bookingId,
+                    'CUSTOMER', :debtorId, 'RESERVATION_AMENDMENT', :description,
+                    :dueDate, :amountDue, :amountDue, 0,
+                    :currency, 'SETTLED', now(), now(), now()
+                )
+                """)
+            .param("id", receivableId)
+            .param("code", receivableCode)
+            .param("sourceKey", sourceKey)
+            .param("bookingId", bookingId)
+            .param("debtorId", customerId)
+            .param("description", description)
+            .param("dueDate", dueDate != null ? dueDate : LocalDate.now().plusDays(1))
+            .param("amountDue", amountDue)
+            .param("currency", currency)
+            .update();
+
+        var latestTx = jdbc.sql("""
+                SELECT id FROM app.payment_transactions
+                WHERE booking_id = :bookingId AND transaction_type = 'PAYMENT' AND status = 'SUCCEEDED'
+                ORDER BY occurred_at DESC LIMIT 1
+                """)
+            .param("bookingId", bookingId)
+            .query(UUID.class)
+            .optional();
+
+        latestTx.ifPresent(txId -> {
+            jdbc.sql("""
+                    INSERT INTO app.receivable_allocations(
+                        id, receivable_id, payment_transaction_id, amount, allocated_at
+                    )
+                    VALUES (
+                        gen_random_uuid(), :receivableId, :txId, :amount, now()
+                    )
+                    """)
+                .param("receivableId", receivableId)
+                .param("txId", txId)
+                .param("amount", amountDue)
+                .update();
+        });
+
+        return receivableId;
     }
 
     @Transactional(propagation = Propagation.MANDATORY)

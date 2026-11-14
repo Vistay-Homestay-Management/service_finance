@@ -22,6 +22,7 @@ import com.vistay.finance.application.dto.AmendmentProposalSnapshot;
 import com.vistay.finance.application.dto.AssessReservationAmendmentCommand;
 import com.vistay.finance.application.dto.ReservationAmendmentAssessmentResponse;
 import com.vistay.finance.application.service.ReservationAmendmentAssessmentService;
+import com.vistay.finance.application.service.ReservationAmendmentAssessmentService.AuthoritativeScopeContext;
 import com.vistay.finance.domain.model.AmendmentAssessmentStatus;
 import com.vistay.finance.domain.model.AmendmentRequiredAction;
 import com.vistay.finance.domain.model.ReservationAmendmentAssessment;
@@ -32,6 +33,7 @@ import java.time.LocalDate;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -58,10 +60,18 @@ class ReservationAmendmentAssessmentAuthorizationTest {
     private final UUID propertyId = UUID.randomUUID();
     private final UUID customerId = UUID.randomUUID();
 
+    @BeforeEach
+    void setUp() {
+        when(jwt.getSubject()).thenReturn(accountId.toString());
+        when(assessmentService.resolveOrVerifyAssessScope(any(), any(), any()))
+            .thenReturn(new AuthoritativeScopeContext(propertyId, customerId));
+        when(assessmentService.resolveAuthoritativeScope(any(), any()))
+            .thenReturn(new AuthoritativeScopeContext(propertyId, customerId));
+    }
+
     @Test
     @DisplayName("Assess amendment: requires RESERVATION_AMENDMENT_ASSESS permission and passes ALL scope")
     void assessAmendment_withAllScope_succeeds() {
-        when(jwt.getSubject()).thenReturn(accountId.toString());
         when(authorizationClient.require(accountId, FinanceOperationalAuthorization.RESERVATION_AMENDMENT_ASSESS))
             .thenReturn(new Snapshot(true, profileId, 1L, Map.of(
                 FinanceOperationalAuthorization.RESERVATION_AMENDMENT_ASSESS, Set.of(Scope.ALL)
@@ -87,7 +97,6 @@ class ReservationAmendmentAssessmentAuthorizationTest {
     @Test
     @DisplayName("Assess amendment: ASSIGNED scope checks booking attribution")
     void assessAmendment_withAssignedScope_checksAssignment() {
-        when(jwt.getSubject()).thenReturn(accountId.toString());
         when(authorizationClient.require(accountId, FinanceOperationalAuthorization.RESERVATION_AMENDMENT_ASSESS))
             .thenReturn(new Snapshot(true, profileId, 1L, Map.of(
                 FinanceOperationalAuthorization.RESERVATION_AMENDMENT_ASSESS, Set.of(Scope.ASSIGNED)
@@ -111,7 +120,6 @@ class ReservationAmendmentAssessmentAuthorizationTest {
     @Test
     @DisplayName("Assess amendment: unassigned booking with ASSIGNED scope throws 403 Forbidden")
     void assessAmendment_withAssignedScope_notAssigned_throwsForbidden() {
-        when(jwt.getSubject()).thenReturn(accountId.toString());
         when(authorizationClient.require(accountId, FinanceOperationalAuthorization.RESERVATION_AMENDMENT_ASSESS))
             .thenReturn(new Snapshot(true, profileId, 1L, Map.of(
                 FinanceOperationalAuthorization.RESERVATION_AMENDMENT_ASSESS, Set.of(Scope.ASSIGNED)
@@ -131,6 +139,91 @@ class ReservationAmendmentAssessmentAuthorizationTest {
                 ResponseStatusException rse = (ResponseStatusException) ex;
                 assertThat(rse.getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN);
             });
+    }
+
+    @Test
+    @DisplayName("Decision: spoofed cross-branch propertyId query param throws 403 Forbidden")
+    void getDecision_spoofedPropertyId_throwsForbidden() {
+        when(authorizationClient.require(accountId, FinanceOperationalAuthorization.RESERVATION_DECISION_VIEW))
+            .thenReturn(new Snapshot(true, profileId, 1L, Map.of(
+                FinanceOperationalAuthorization.RESERVATION_DECISION_VIEW, Set.of(Scope.ALL)
+            ), Map.of()));
+
+        UUID spoofedPropertyId = UUID.randomUUID();
+        assertThatThrownBy(() -> controller.getDecision(
+            jwt, bookingId, "prop-1", spoofedPropertyId, null, null, null, null
+        ))
+            .isInstanceOf(ResponseStatusException.class)
+            .satisfies(ex -> {
+                ResponseStatusException rse = (ResponseStatusException) ex;
+                assertThat(rse.getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN);
+                assertThat(rse.getReason()).contains("Cross-branch property mismatch");
+            });
+    }
+
+    @Test
+    @DisplayName("Field group projection: missing X-Field-Groups returns only baseline RESERVATION_SUMMARY")
+    @SuppressWarnings("unchecked")
+    void parseFieldGroups_missingHeader_passesOnlySummary() {
+        when(authorizationClient.require(accountId, FinanceOperationalAuthorization.RESERVATION_DECISION_VIEW))
+            .thenReturn(new Snapshot(true, profileId, 1L, Map.of(
+                FinanceOperationalAuthorization.RESERVATION_DECISION_VIEW, Set.of(Scope.ALL)
+            ), Map.of()));
+
+        when(assessmentService.getFinalDecision(eq(bookingId), eq("prop-1"), any(), any(), any()))
+            .thenReturn(dummyResponse());
+
+        controller.getDecision(jwt, bookingId, "prop-1", null, null, null, null, null);
+
+        ArgumentCaptor<Set<ReservationFieldGroup>> captor = ArgumentCaptor.forClass(Set.class);
+        verify(assessmentService).getFinalDecision(eq(bookingId), eq("prop-1"), any(), any(), captor.capture());
+
+        assertThat(captor.getValue()).containsExactly(ReservationFieldGroup.RESERVATION_SUMMARY);
+    }
+
+    @Test
+    @DisplayName("Field group projection: forged X-Field-Groups without grants is filtered to RESERVATION_SUMMARY")
+    @SuppressWarnings("unchecked")
+    void parseFieldGroups_forgedHeaderWithoutGrants_isFiltered() {
+        // Actor only has basic RESERVATION_DECISION_VIEW with ASSIGNED scope (no financial/audit grant)
+        when(authorizationClient.require(accountId, FinanceOperationalAuthorization.RESERVATION_DECISION_VIEW))
+            .thenReturn(new Snapshot(true, profileId, 1L, Map.of(
+                FinanceOperationalAuthorization.RESERVATION_DECISION_VIEW, Set.of(Scope.ASSIGNED)
+            ), Map.of()));
+        when(bookingClient.get(bookingId)).thenReturn(new BookingRecord(bookingId, propertyId, Set.of(profileId)));
+
+        when(assessmentService.getFinalDecision(eq(bookingId), eq("prop-1"), any(), any(), any()))
+            .thenReturn(dummyResponse());
+
+        // Client attempts to forge FINANCIAL, TRUST_DETAIL, INTERNAL_AUDIT
+        controller.getDecision(jwt, bookingId, "prop-1", null, null, null, null, "FINANCIAL,TRUST_DETAIL,INTERNAL_AUDIT");
+
+        ArgumentCaptor<Set<ReservationFieldGroup>> captor = ArgumentCaptor.forClass(Set.class);
+        verify(assessmentService).getFinalDecision(eq(bookingId), eq("prop-1"), any(), any(), captor.capture());
+
+        // Forged groups must NOT be passed to service
+        assertThat(captor.getValue()).containsExactly(ReservationFieldGroup.RESERVATION_SUMMARY);
+    }
+
+    @Test
+    @DisplayName("Field group projection: authorized actor requesting FINANCIAL receives FINANCIAL")
+    @SuppressWarnings("unchecked")
+    void parseFieldGroups_authorizedActorRequestingFinancial_succeeds() {
+        when(authorizationClient.require(accountId, FinanceOperationalAuthorization.RESERVATION_DECISION_VIEW))
+            .thenReturn(new Snapshot(true, profileId, 1L, Map.of(
+                FinanceOperationalAuthorization.RESERVATION_DECISION_VIEW, Set.of(Scope.ALL),
+                FinanceOperationalAuthorization.FINANCE_READ, Set.of(Scope.ALL)
+            ), Map.of()));
+
+        when(assessmentService.getFinalDecision(eq(bookingId), eq("prop-1"), any(), any(), any()))
+            .thenReturn(dummyResponse());
+
+        controller.getDecision(jwt, bookingId, "prop-1", null, null, null, null, "FINANCIAL");
+
+        ArgumentCaptor<Set<ReservationFieldGroup>> captor = ArgumentCaptor.forClass(Set.class);
+        verify(assessmentService).getFinalDecision(eq(bookingId), eq("prop-1"), any(), any(), captor.capture());
+
+        assertThat(captor.getValue()).contains(ReservationFieldGroup.RESERVATION_SUMMARY, ReservationFieldGroup.FINANCIAL);
     }
 
     @Test

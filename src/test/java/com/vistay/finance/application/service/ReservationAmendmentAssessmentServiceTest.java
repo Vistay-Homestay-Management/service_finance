@@ -430,6 +430,174 @@ class ReservationAmendmentAssessmentServiceTest {
         verify(assessmentRepository, never()).findCurrentForUpdate(any(), any());
     }
 
+    @Test
+    @DisplayName("AC01: Zero delta marks requiredAction=NO_CHANGE and status=VERIFIED immediately")
+    void assessAmendment_withZeroDelta_marksNoChangeAndVerifiedImmediately() {
+        var before = snapshot(BigDecimal.valueOf(10000000), false);
+        var after = snapshot(BigDecimal.valueOf(10000000), false);
+        var cmd = new AssessReservationAmendmentCommand(
+            bookingId, proposalId, "DEP-STD", before, after,
+            Instant.now().plusSeconds(1800), "idem-zero-delta", "corr-zero", actorId, null
+        );
+
+        when(ledgerSupport.checkAndLockIdempotency(anyString(), anyString(), anyString(), any(), anyString(), any()))
+            .thenReturn(new ReservationAmendmentLedgerSupport.IdempotencyRecord(false, null, null));
+
+        RuleCatalogue rule = mock(RuleCatalogue.class);
+        when(rule.getId()).thenReturn(UUID.randomUUID());
+        when(rule.getRuleVersion()).thenReturn(1);
+        when(rule.getParametersJson()).thenReturn("{\"depositRate\": \"0.30\"}");
+        when(ruleRepository.findActiveEffectiveRulesByTypeAndCode(any(), any(), any())).thenReturn(List.of(rule));
+
+        // Booking has already paid exactly the required deposit amount
+        when(paymentTransactionRepository.calculateTotalPaidAmountByBookingId(bookingId))
+            .thenReturn(BigDecimal.valueOf(3000000));
+        when(paymentTransactionRepository.calculateTotalRefundedAmountByBookingId(bookingId))
+            .thenReturn(BigDecimal.ZERO);
+
+        when(assessmentRepository.findCurrentForUpdate(bookingId, proposalId)).thenReturn(Optional.empty());
+        when(assessmentRepository.findTopByBookingIdAndProposalIdOrderByAmendmentRevisionDesc(bookingId, proposalId))
+            .thenReturn(Optional.empty());
+        when(assessmentRepository.saveAndFlush(any())).thenAnswer(inv -> inv.getArgument(0));
+
+        var response = service.assessAmendment(cmd, actorId, Set.of(ReservationFieldGroup.RESERVATION_SUMMARY));
+
+        assertThat(response.requiredAction()).isEqualTo(AmendmentRequiredAction.NO_CHANGE);
+        assertThat(response.status()).isEqualTo(AmendmentAssessmentStatus.VERIFIED);
+        assertThat(response.executable()).isTrue();
+    }
+
+    @Test
+    @DisplayName("Verification: rejects collection verification when status is REFUND_DUE")
+    void verifyCollection_whenStatusRefundDue_throwsConflict() {
+        var snapshot = snapshot(BigDecimal.valueOf(10000000), false);
+        var fp = snapshot.canonicalSha256();
+
+        var refundDueAssessment = new ReservationAmendmentAssessment(
+            UUID.randomUUID(), bookingId, propertyId, customerId, proposalId, 1L,
+            fp, fp, UUID.randomUUID(), 1,
+            BigDecimal.valueOf(5000000), BigDecimal.valueOf(3000000), BigDecimal.valueOf(5000000),
+            BigDecimal.valueOf(-2000000), "VND", AmendmentRequiredAction.REFUND_DUE,
+            AmendmentAssessmentStatus.REFUND_DUE, actorId, Instant.now().plusSeconds(1800),
+            "key-ref-ver", "corr-ref-ver"
+        );
+
+        when(assessmentRepository.findCurrentForUpdate(bookingId, proposalId))
+            .thenReturn(Optional.of(refundDueAssessment));
+
+        assertThatThrownBy(() -> service.verifyCollection(
+            bookingId, proposalId, null, "idem-ref-ver", "corr", actorId, Set.of()
+        ))
+            .isInstanceOf(ReservationAmendmentException.class)
+            .satisfies(ex -> {
+                ReservationAmendmentException rae = (ReservationAmendmentException) ex;
+                assertThat(rae.getStatus()).isEqualTo(HttpStatus.CONFLICT);
+                assertThat(rae.getErrorCode()).isEqualTo("INVALID_STATUS_FOR_COLLECTION_VERIFICATION");
+            });
+    }
+
+    @Test
+    @DisplayName("Verification: rejects collection verification when status is WAIVER_REVIEW")
+    void verifyCollection_whenStatusWaiverReview_throwsConflict() {
+        var snapshot = snapshot(BigDecimal.valueOf(10000000), true);
+        var fp = snapshot.canonicalSha256();
+
+        var waiverReviewAssessment = new ReservationAmendmentAssessment(
+            UUID.randomUUID(), bookingId, propertyId, customerId, proposalId, 1L,
+            fp, fp, UUID.randomUUID(), 1,
+            BigDecimal.valueOf(3000000), BigDecimal.valueOf(5000000), BigDecimal.valueOf(3000000),
+            BigDecimal.valueOf(2000000), "VND", AmendmentRequiredAction.WAIVER_REVIEW,
+            AmendmentAssessmentStatus.WAIVER_REVIEW, actorId, Instant.now().plusSeconds(1800),
+            "key-w-ver", "corr-w-ver"
+        );
+
+        when(assessmentRepository.findCurrentForUpdate(bookingId, proposalId))
+            .thenReturn(Optional.of(waiverReviewAssessment));
+
+        assertThatThrownBy(() -> service.verifyCollection(
+            bookingId, proposalId, null, "idem-w-ver", "corr", actorId, Set.of()
+        ))
+            .isInstanceOf(ReservationAmendmentException.class)
+            .satisfies(ex -> {
+                ReservationAmendmentException rae = (ReservationAmendmentException) ex;
+                assertThat(rae.getStatus()).isEqualTo(HttpStatus.CONFLICT);
+                assertThat(rae.getErrorCode()).isEqualTo("INVALID_STATUS_FOR_COLLECTION_VERIFICATION");
+            });
+    }
+
+    @Test
+    @DisplayName("Verification: preserves immutable assessed obligation delta after collection verification")
+    void verifyCollection_preservesImmutableAssessedDelta() {
+        var snapshot = snapshot(BigDecimal.valueOf(10000000), false);
+        var fp = snapshot.canonicalSha256();
+
+        var assessment = new ReservationAmendmentAssessment(
+            UUID.randomUUID(), bookingId, propertyId, customerId, proposalId, 1L,
+            fp, fp, UUID.randomUUID(), 1,
+            BigDecimal.valueOf(3000000), BigDecimal.valueOf(5000000), BigDecimal.valueOf(3000000),
+            BigDecimal.valueOf(2000000), "VND", AmendmentRequiredAction.COLLECTION_REQUIRED,
+            AmendmentAssessmentStatus.COLLECTION_REQUIRED, actorId, Instant.now().plusSeconds(1800),
+            "key-imm-delta", "corr-imm-delta"
+        );
+
+        when(assessmentRepository.findCurrentForUpdate(bookingId, proposalId))
+            .thenReturn(Optional.of(assessment));
+        when(paymentTransactionRepository.calculateTotalPaidAmountByBookingId(bookingId))
+            .thenReturn(BigDecimal.valueOf(5000000));
+        when(paymentTransactionRepository.calculateTotalRefundedAmountByBookingId(bookingId))
+            .thenReturn(BigDecimal.ZERO);
+        when(assessmentRepository.saveAndFlush(any())).thenAnswer(inv -> inv.getArgument(0));
+
+        var response = service.verifyCollection(
+            bookingId, proposalId, null, "idem-imm-ver", "corr", actorId,
+            Set.of(ReservationFieldGroup.FINANCIAL)
+        );
+
+        assertThat(response.status()).isEqualTo(AmendmentAssessmentStatus.VERIFIED);
+        assertThat(response.deltaAmount()).isEqualByComparingTo(BigDecimal.valueOf(2000000));
+        assertThat(assessment.getDeltaAmount()).isEqualByComparingTo(BigDecimal.valueOf(2000000));
+    }
+
+    @Test
+    @DisplayName("Executed event: creates settled receivable with allocation when fully collected")
+    void processAmendmentExecutedEvent_whenFullyCollected_createsSettledReceivable() {
+        UUID eventId = UUID.randomUUID();
+        var snapshot = snapshot(BigDecimal.valueOf(10000000), false);
+        var fp = snapshot.canonicalSha256();
+
+        // Assessment where full required 5,000,000 has been collected
+        var assessment = new ReservationAmendmentAssessment(
+            UUID.randomUUID(), bookingId, propertyId, customerId, proposalId, 1L,
+            fp, fp, UUID.randomUUID(), 1,
+            BigDecimal.valueOf(3000000), BigDecimal.valueOf(5000000), BigDecimal.valueOf(5000000),
+            BigDecimal.valueOf(2000000), "VND", AmendmentRequiredAction.COLLECTION_REQUIRED,
+            AmendmentAssessmentStatus.VERIFIED, actorId, Instant.now().plusSeconds(1800),
+            "key-exec-settled", "corr-exec-settled"
+        );
+
+        when(ledgerSupport.tryClaimEvent(eventId, "finance-amendment-executed-v1")).thenReturn(true);
+        when(assessmentRepository.findCurrentForUpdate(bookingId, proposalId)).thenReturn(Optional.of(assessment));
+        when(assessmentRepository.saveAndFlush(any())).thenAnswer(inv -> inv.getArgument(0));
+
+        UUID settledRecId = UUID.randomUUID();
+        when(ledgerSupport.insertSettledCompensatingReceivable(
+            eq(bookingId), eq(customerId), eq(proposalId), eq(eventId), any(), eq(BigDecimal.valueOf(2000000)), eq("VND")
+        )).thenReturn(settledRecId);
+
+        var cmd = new ReservationAmendmentExecutedCommand(
+            eventId, bookingId, proposalId, fp, customerId, LocalDate.now().plusDays(2), "corr-exec-settled", actorId
+        );
+
+        service.processAmendmentExecutedEvent(cmd);
+
+        assertThat(assessment.getStatus()).isEqualTo(AmendmentAssessmentStatus.EXECUTED);
+        assertThat(assessment.getResultingReceivableId()).isEqualTo(settledRecId);
+        verify(ledgerSupport).insertSettledCompensatingReceivable(
+            eq(bookingId), eq(customerId), eq(proposalId), eq(eventId), any(), eq(BigDecimal.valueOf(2000000)), eq("VND")
+        );
+        verify(ledgerSupport, never()).insertCompensatingReceivable(any(), any(), any(), any(), any(), any(), any());
+    }
+
     private AmendmentProposalSnapshot snapshot(BigDecimal lodgingAmount, boolean manualWaiver) {
         return new AmendmentProposalSnapshot(
             propertyId, unitId, customerId, LocalDate.now().plusDays(10), LocalDate.now().plusDays(14),

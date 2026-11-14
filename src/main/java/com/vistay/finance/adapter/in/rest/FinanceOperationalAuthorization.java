@@ -168,6 +168,50 @@ public class FinanceOperationalAuthorization {
         throw forbidden(actor.permission());
     }
 
+    public java.util.Set<com.vistay.finance.domain.model.ReservationFieldGroup> resolveAuthorizedFieldGroups(Actor actor) {
+        java.util.Set<com.vistay.finance.domain.model.ReservationFieldGroup> allowed = new java.util.HashSet<>();
+        allowed.add(com.vistay.finance.domain.model.ReservationFieldGroup.RESERVATION_SUMMARY);
+
+        if (actor == null || actor.snapshot() == null) {
+            return java.util.Set.copyOf(allowed);
+        }
+
+        var grants = actor.snapshot().grants();
+        boolean hasFinancialScope = hasAnyScope(grants, FINANCE_READ, Scope.ALL, Scope.PARTITION)
+            || hasAnyScope(grants, RESERVATION_AMENDMENT_ASSESS, Scope.ALL, Scope.PARTITION)
+            || hasAnyScope(grants, DEPOSIT_WAIVE, Scope.ALL, Scope.PARTITION);
+        if (hasFinancialScope) {
+            allowed.add(com.vistay.finance.domain.model.ReservationFieldGroup.FINANCIAL);
+        }
+
+        boolean hasTrustDetailScope = hasAnyScope(grants, FINANCE_READ, Scope.ALL)
+            || hasAnyScope(grants, RESERVATION_AMENDMENT_ASSESS, Scope.ALL);
+        if (hasTrustDetailScope) {
+            allowed.add(com.vistay.finance.domain.model.ReservationFieldGroup.TRUST_DETAIL);
+        }
+
+        boolean hasAuditScope = grants.containsKey(FINANCE_EXPORT)
+            || hasAnyScope(grants, FINANCE_READ, Scope.ALL);
+        if (hasAuditScope) {
+            allowed.add(com.vistay.finance.domain.model.ReservationFieldGroup.INTERNAL_AUDIT);
+        }
+
+        return java.util.Set.copyOf(allowed);
+    }
+
+    private static boolean hasAnyScope(java.util.Map<String, java.util.Set<Scope>> grants, String permission, Scope... scopes) {
+        java.util.Set<Scope> grantedScopes = grants.get(permission);
+        if (grantedScopes == null || grantedScopes.isEmpty()) {
+            return false;
+        }
+        for (Scope s : scopes) {
+            if (grantedScopes.contains(s)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     public UUID bindActor(Actor actor, UUID suppliedAdminUserId) {
         if (suppliedAdminUserId != null && !suppliedAdminUserId.equals(actor.profileId())) {
             throw new ResponseStatusException(HttpStatus.FORBIDDEN,

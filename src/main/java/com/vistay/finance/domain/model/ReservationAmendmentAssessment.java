@@ -189,14 +189,14 @@ public class ReservationAmendmentAssessment {
     }
 
     public void verifyCollectionSatisfied(BigDecimal updatedVerifiedCollected, Instant at) {
-        if (this.status == AmendmentAssessmentStatus.EXECUTED || this.status == AmendmentAssessmentStatus.STALE) {
-            throw new IllegalStateException("Cannot verify collection in status " + this.status);
+        if (this.status != AmendmentAssessmentStatus.COLLECTION_REQUIRED) {
+            throw new IllegalStateException("Cannot verify collection in status " + this.status + "; only COLLECTION_REQUIRED can be verified");
         }
         this.verifiedCollectedAmount = nonNegative(updatedVerifiedCollected, "updatedVerifiedCollected");
         if (this.verifiedCollectedAmount.compareTo(this.afterRequiredAmount) < 0) {
             throw new IllegalStateException("Collected amount is still below required amendment deposit/payment");
         }
-        this.deltaAmount = this.afterRequiredAmount.subtract(this.verifiedCollectedAmount);
+        // Assessed obligation delta remains immutable across the assessment lifecycle
         this.status = AmendmentAssessmentStatus.VERIFIED;
         this.updatedAt = at != null ? at : Instant.now();
     }

@@ -47,6 +47,8 @@ public class ReservationAmendmentAssessmentService {
     private final ObjectMapper objectMapper;
     private final MeterRegistry meterRegistry;
 
+    public record AuthoritativeScopeContext(UUID propertyId, UUID customerId) {}
+
     public ReservationAmendmentAssessmentService(
         ReservationAmendmentAssessmentRepository assessmentRepository,
         RuleCatalogueRepository ruleRepository,
@@ -135,7 +137,7 @@ public class ReservationAmendmentAssessmentService {
             status = AmendmentAssessmentStatus.REFUND_DUE;
         } else {
             action = AmendmentRequiredAction.NO_CHANGE;
-            status = AmendmentAssessmentStatus.NO_CHANGE;
+            status = AmendmentAssessmentStatus.VERIFIED;
         }
 
         Optional<ReservationAmendmentAssessment> currentOpt = assessmentRepository.findCurrentForUpdate(
@@ -242,6 +244,55 @@ public class ReservationAmendmentAssessmentService {
     }
 
     @Transactional(readOnly = true)
+    public AuthoritativeScopeContext resolveAuthoritativeScope(UUID bookingId, String proposalId) {
+        var assessmentOpt = assessmentRepository.findFirstByBookingIdAndProposalIdAndCurrentTrue(bookingId, proposalId)
+            .or(() -> assessmentRepository.findTopByBookingIdAndProposalIdOrderByAmendmentRevisionDesc(bookingId, proposalId));
+        if (assessmentOpt.isPresent()) {
+            var a = assessmentOpt.get();
+            return new AuthoritativeScopeContext(a.getPropertyId(), a.getCustomerId());
+        }
+        var bookingOpt = ledgerSupport.findBookingContext(bookingId);
+        if (bookingOpt.isPresent()) {
+            var b = bookingOpt.get();
+            return new AuthoritativeScopeContext(b.propertyId(), b.customerId());
+        }
+        throw new ReservationAmendmentException(
+            HttpStatus.NOT_FOUND,
+            "ASSESSMENT_NOT_FOUND",
+            "No authoritative amendment or booking record found for booking " + bookingId + " proposal " + proposalId
+        );
+    }
+
+    @Transactional(readOnly = true)
+    public AuthoritativeScopeContext resolveOrVerifyAssessScope(UUID bookingId, UUID suppliedPropertyId, UUID suppliedCustomerId) {
+        var bookingOpt = ledgerSupport.findBookingContext(bookingId);
+        if (bookingOpt.isPresent()) {
+            var b = bookingOpt.get();
+            if (suppliedPropertyId != null && !suppliedPropertyId.equals(b.propertyId())) {
+                throw new ReservationAmendmentException(
+                    HttpStatus.FORBIDDEN,
+                    "PROPERTY_SPOOF_ATTEMPT",
+                    "Supplied property " + suppliedPropertyId + " does not match authoritative booking property " + b.propertyId()
+                );
+            }
+            return new AuthoritativeScopeContext(b.propertyId(), b.customerId());
+        }
+        var latestAssessments = assessmentRepository.findByBookingIdOrderByCreatedAtDesc(bookingId);
+        if (!latestAssessments.isEmpty()) {
+            var a = latestAssessments.get(0);
+            if (suppliedPropertyId != null && !suppliedPropertyId.equals(a.getPropertyId())) {
+                throw new ReservationAmendmentException(
+                    HttpStatus.FORBIDDEN,
+                    "PROPERTY_SPOOF_ATTEMPT",
+                    "Supplied property " + suppliedPropertyId + " does not match authoritative booking property " + a.getPropertyId()
+                );
+            }
+            return new AuthoritativeScopeContext(a.getPropertyId(), a.getCustomerId());
+        }
+        return new AuthoritativeScopeContext(suppliedPropertyId, suppliedCustomerId);
+    }
+
+    @Transactional(readOnly = true)
     public ReservationAmendmentAssessmentResponse getFinalDecision(
         UUID bookingId,
         String proposalId,
@@ -317,6 +368,14 @@ public class ReservationAmendmentAssessmentService {
                 HttpStatus.CONFLICT,
                 "OPTIMISTIC_LOCK_CONFLICT",
                 "Amendment assessment version mismatch"
+            );
+        }
+
+        if (assessment.getStatus() != AmendmentAssessmentStatus.COLLECTION_REQUIRED) {
+            throw new ReservationAmendmentException(
+                HttpStatus.CONFLICT,
+                "INVALID_STATUS_FOR_COLLECTION_VERIFICATION",
+                "Collection verification is only allowed when assessment is in COLLECTION_REQUIRED status, current: " + assessment.getStatus()
             );
         }
 
@@ -548,15 +607,28 @@ public class ReservationAmendmentAssessmentService {
                     "Customer debtor id is required to create amendment receivable"
                 );
             }
-            resultingReceivableId = ledgerSupport.insertCompensatingReceivable(
-                cmd.bookingId(),
-                customerId,
-                cmd.proposalId(),
-                cmd.eventId(),
-                cmd.dueDate(),
-                assessment.getDeltaAmount(),
-                assessment.getCurrency()
-            );
+            boolean fullyCollected = assessment.getVerifiedCollectedAmount().compareTo(assessment.getAfterRequiredAmount()) >= 0;
+            if (fullyCollected) {
+                resultingReceivableId = ledgerSupport.insertSettledCompensatingReceivable(
+                    cmd.bookingId(),
+                    customerId,
+                    cmd.proposalId(),
+                    cmd.eventId(),
+                    cmd.dueDate(),
+                    assessment.getDeltaAmount(),
+                    assessment.getCurrency()
+                );
+            } else {
+                resultingReceivableId = ledgerSupport.insertCompensatingReceivable(
+                    cmd.bookingId(),
+                    customerId,
+                    cmd.proposalId(),
+                    cmd.eventId(),
+                    cmd.dueDate(),
+                    assessment.getDeltaAmount(),
+                    assessment.getCurrency()
+                );
+            }
         } else if (assessment.getDeltaAmount().compareTo(BigDecimal.ZERO) < 0) {
             var originalTx = paymentTransactionRepository.findFirstByBookingIdAndTransactionTypeAndStatusOrderByOccurredAtDesc(
                 cmd.bookingId(),

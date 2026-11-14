@@ -20,6 +20,7 @@ import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.server.ResponseStatusException;
 
 @RestController
 @RequestMapping("/api/v1/finance/reservation-amendments")
@@ -43,18 +44,23 @@ public class ReservationAmendmentAssessmentController {
         @RequestHeader(value = "X-Field-Groups", required = false) String fieldGroupsHeader
     ) {
         var actor = authorization.require(jwt, FinanceOperationalAuthorization.RESERVATION_AMENDMENT_ASSESS);
-        authorization.requireReservationAccess(
-            actor,
+        var scopeContext = assessmentService.resolveOrVerifyAssessScope(
             command.bookingId(),
             command.afterSnapshot().propertyId(),
             command.afterSnapshot().customerId()
         );
+        authorization.requireReservationAccess(
+            actor,
+            command.bookingId(),
+            scopeContext.propertyId(),
+            scopeContext.customerId()
+        );
 
-        Set<ReservationFieldGroup> grantedGroups = parseFieldGroups(fieldGroupsHeader);
+        Set<ReservationFieldGroup> effectiveGroups = resolveEffectiveFieldGroups(actor, fieldGroupsHeader);
         ReservationAmendmentAssessmentResponse response = assessmentService.assessAmendment(
             command,
             actor.profileId(),
-            grantedGroups
+            effectiveGroups
         );
 
         return ResponseEntity.status(HttpStatus.CREATED).body(response);
@@ -72,15 +78,24 @@ public class ReservationAmendmentAssessmentController {
         @RequestHeader(value = "X-Field-Groups", required = false) String fieldGroupsHeader
     ) {
         var actor = authorization.require(jwt, FinanceOperationalAuthorization.RESERVATION_DECISION_VIEW);
-        authorization.requireReservationAccess(actor, bookingId, propertyId, customerId);
+        var scopeContext = assessmentService.resolveAuthoritativeScope(bookingId, proposalId);
+        if (propertyId != null && !propertyId.equals(scopeContext.propertyId())) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN,
+                "Cross-branch property mismatch with authoritative record");
+        }
+        if (customerId != null && !customerId.equals(scopeContext.customerId())) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN,
+                "Customer mismatch with authoritative record");
+        }
+        authorization.requireReservationAccess(actor, bookingId, scopeContext.propertyId(), scopeContext.customerId());
 
-        Set<ReservationFieldGroup> grantedGroups = parseFieldGroups(fieldGroupsHeader);
+        Set<ReservationFieldGroup> effectiveGroups = resolveEffectiveFieldGroups(actor, fieldGroupsHeader);
         ReservationAmendmentAssessmentResponse response = assessmentService.getFinalDecision(
             bookingId,
             proposalId,
             expectedFingerprint,
             expectedVersion,
-            grantedGroups
+            effectiveGroups
         );
 
         return ResponseEntity.ok(response);
@@ -99,9 +114,18 @@ public class ReservationAmendmentAssessmentController {
         @RequestHeader(value = "X-Field-Groups", required = false) String fieldGroupsHeader
     ) {
         var actor = authorization.require(jwt, FinanceOperationalAuthorization.RESERVATION_DECISION_VIEW);
-        authorization.requireReservationAccess(actor, bookingId, propertyId, customerId);
+        var scopeContext = assessmentService.resolveAuthoritativeScope(bookingId, proposalId);
+        if (propertyId != null && !propertyId.equals(scopeContext.propertyId())) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN,
+                "Cross-branch property mismatch with authoritative record");
+        }
+        if (customerId != null && !customerId.equals(scopeContext.customerId())) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN,
+                "Customer mismatch with authoritative record");
+        }
+        authorization.requireReservationAccess(actor, bookingId, scopeContext.propertyId(), scopeContext.customerId());
 
-        Set<ReservationFieldGroup> grantedGroups = parseFieldGroups(fieldGroupsHeader);
+        Set<ReservationFieldGroup> effectiveGroups = resolveEffectiveFieldGroups(actor, fieldGroupsHeader);
         ReservationAmendmentAssessmentResponse response = assessmentService.verifyCollection(
             bookingId,
             proposalId,
@@ -109,7 +133,7 @@ public class ReservationAmendmentAssessmentController {
             idempotencyKey,
             correlationId,
             actor.profileId(),
-            grantedGroups
+            effectiveGroups
         );
 
         return ResponseEntity.ok(response);
@@ -122,27 +146,39 @@ public class ReservationAmendmentAssessmentController {
         @RequestHeader(value = "X-Field-Groups", required = false) String fieldGroupsHeader
     ) {
         var actor = authorization.require(jwt, FinanceOperationalAuthorization.DEPOSIT_WAIVE);
-        authorization.requireReservationAccess(actor, command.bookingId(), null, null);
+        var scopeContext = assessmentService.resolveAuthoritativeScope(command.bookingId(), command.proposalId());
+        authorization.requireReservationAccess(actor, command.bookingId(), scopeContext.propertyId(), scopeContext.customerId());
         UUID adminUserId = authorization.bindActor(actor, command.approvedByAdminUserId());
 
-        Set<ReservationFieldGroup> grantedGroups = parseFieldGroups(fieldGroupsHeader);
+        Set<ReservationFieldGroup> effectiveGroups = resolveEffectiveFieldGroups(actor, fieldGroupsHeader);
         ReservationAmendmentAssessmentResponse response = assessmentService.approveWaiver(
             command,
             adminUserId,
-            grantedGroups
+            effectiveGroups
         );
 
         return ResponseEntity.ok(response);
     }
 
+    private Set<ReservationFieldGroup> resolveEffectiveFieldGroups(
+        FinanceOperationalAuthorization.Actor actor,
+        String fieldGroupsHeader
+    ) {
+        Set<ReservationFieldGroup> authorized = authorization.resolveAuthorizedFieldGroups(actor);
+        Set<ReservationFieldGroup> requested = parseFieldGroups(fieldGroupsHeader);
+        Set<ReservationFieldGroup> effective = new HashSet<>();
+        effective.add(ReservationFieldGroup.RESERVATION_SUMMARY);
+        for (var req : requested) {
+            if (authorized.contains(req)) {
+                effective.add(req);
+            }
+        }
+        return Set.copyOf(effective);
+    }
+
     private static Set<ReservationFieldGroup> parseFieldGroups(String header) {
         if (header == null || header.isBlank()) {
-            return Set.of(
-                ReservationFieldGroup.RESERVATION_SUMMARY,
-                ReservationFieldGroup.FINANCIAL,
-                ReservationFieldGroup.TRUST_DETAIL,
-                ReservationFieldGroup.INTERNAL_AUDIT
-            );
+            return Set.of(ReservationFieldGroup.RESERVATION_SUMMARY);
         }
         Set<ReservationFieldGroup> groups = new HashSet<>();
         for (String part : header.split(",")) {
